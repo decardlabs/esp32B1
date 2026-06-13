@@ -1,0 +1,37 @@
+menu "XiaoZhi Config"
+
+    config XIAOZHI_WIFI_SSID
+        string "Wi-Fi SSID"
+        default "wfeng"
+
+    config XIAOZHI_WIFI_PASSWORD
+        string "Wi-Fi Password"
+        default "wf05430543"
+
+    config XIAOZHI_WS_URL
+        string "XiaoZhi WebSocket URL"
+        default "wss://api.tenclass.net/xiaozhi/v1/"
+
+    config XIAOZHI_OTA_URL
+        string "XiaoZhi OTA URL"
+        default "https://api.tenclass.net/xiaozhi/ota/"
+
+    config XIAOZHI_ACCESS_TOKEN
+        string "XiaoZhi Access Token"
+        default ""
+
+    config XIAOZHI_ENABLE_LCD_STATUS
+        bool "Enable XiaoZhi LCD status UI"
+        default y
+
+    config XIAOZHI_INPUT_GAIN_DB
+        int "Microphone gain (dB)"
+        range 0 36
+        default 24
+
+    config XIAOZHI_OUTPUT_VOLUME
+        int "Speaker volume (0-100)"
+        range 0 100
+        default 100
+
+endmenu

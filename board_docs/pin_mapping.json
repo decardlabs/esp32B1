@@ -1,0 +1,149 @@
+{
+  "原理图项目": "LYIT_ESP32S3MB",
+  "板块": [
+    "H001_主控 (page1)",
+    "I2S_音频 (page2)",
+    "OV2640_摄像头 (page3)"
+  ],
+  "日期": "2026-05-15",
+  "主芯片": "ESP32-S3-WROOM-1",
+  "映射状态": {
+    "结论": "已确认",
+    "说明": "当前映射项均已确认。"
+  },
+  "已确认映射": {
+    "IO扩展": {
+      "芯片": "XL9555",
+      "I2C地址": "0x20 (A0=A1=A2=GND)",
+      "连接": {
+        "SCL": "IO42 (IIC_SCL)",
+        "SDA": "IO41 (IIC_SDA)",
+        "INT": "IO40 (IIC_INT, 上拉10k)"
+      },
+      "P0口": {
+        "IO0_0": "SPK_EN",
+        "IO0_1": "BEEP (蜂鸣器)",
+        "IO0_2": "OV_PWDN (摄像头掉电)",
+        "IO0_3": "OV_RESET (摄像头复位)",
+        "IO0_4": "KEY3",
+        "IO0_5": "KEY4",
+        "IO0_6": "KEY3",
+        "IO0_7": "KEY4"
+      },
+      "P1口": {
+        "IO1_0": "NC (空)",
+        "IO1_1": "TFT_BLK",
+        "IO1_2": "NC (空)",
+        "IO1_3": "TFT_RES",
+        "IO1_4": "LED1",
+        "IO1_5": "LED2",
+        "IO1_6": "LED3",
+        "IO1_7": "LED4"
+      }
+    },
+    "ESP32-S3引脚分配": {
+      "IO0": "BOOT按键 / LED0(D11)",
+      "IO1": "TFT_DC (屏幕数据/命令选择)",
+      "IO2": "TFT_PEN, 引出到JP3",
+      "IO3": "I2S_MCLK",
+      "IO4": "OV_D0",
+      "IO5": "OV_D1",
+      "IO6": "OV_D2",
+      "IO7": "OV_D3",
+      "IO8": "OV_D4, 引出到JP2",
+      "IO9": "I2S_LRCK, 引出到JP3",
+      "IO10": "I2S_SDIN, 引出到JP3",
+      "IO11": "SPI_MOSI / TFT_MOSI, 引出到JP3",
+      "IO12": "SPI_SCK / TFT_CLK (TF卡+TFT共享)",
+      "IO13": "SPI_MISO (TF卡+TFT共享, 受JP1影响), 引出到JP3",
+      "IO14": "I2S_SDOUT, 引出到JP3",
+      "IO15": "(不作为TF_CS)",
+      "IO16": "OV_D5",
+      "IO17": "OV_D6",
+      "IO18": "OV_D7",
+      "IO38": "OV_SCL",
+      "IO39": "OV_SDA",
+      "IO45": "OV_PCLK",
+      "IO46": "I2S_SCK",
+      "IO47": "OV_VSYNC",
+      "IO48": "OV_HREF",
+      "IO40": "IIC_INT / TF_CS / KEY0",
+      "IO41": "IIC_SDA",
+      "IO42": "IIC_SCL",
+      "RXD0": "U0_RXD <- CH340C TXD",
+      "TXD0": "U0_TXD -> CH340C RXD",
+      "USB_D-": "原生USB FS D-",
+      "USB_D+": "原生USB FS D+"
+    },
+    "总线": {
+      "主I2C": {
+        "时钟": "IO42 (IIC_SCL)",
+        "数据": "IO41 (IIC_SDA)",
+        "设备": [
+          "XL9555",
+          "ES8388"
+        ]
+      },
+      "I2S_连接ES8388": {
+        "MCLK": "I2S_MCLK (IO3)",
+        "BCK": "I2S_SCK (IO46)",
+        "LRCK": "I2S_LRCK (IO9)",
+        "DIN": "I2S_SDIN (IO10) -> ES8388 CDATA",
+        "DOUT": "I2S_SDOUT (IO14) <- ES8388 ASDOUT",
+        "复用说明": "SPI_SCK 与 TFT_CLK 复用在 IO12"
+      },
+      "摄像头SCCB": "OV_SDA/OV_SCL 与主I2C分离"
+    },
+    "模块级信息": {
+      "摄像头": {
+        "型号": "OV2640",
+        "连接器": "J15 FPC 0.5mm 24P",
+        "数据总线": "D0-D7 -> IO4-IO11",
+        "同步信号": "VSYNC/HREF/PCLK -> IO47/IO48/IO45",
+        "主时钟": "来自20MHz有源晶振Y1 (非ESP32输出)",
+        "控制": "RESET=XL9555 IO0_3; PWDN=XL9555 IO0_2",
+        "电源域": {
+          "A_VDD": "LDO_2.8V -> AVDD",
+          "DOVDD": "LDO_2.8V -> DOVDD",
+          "CORE_1.3V": "LDO_1.3V",
+          "DVDD": "未见独立网名"
+        }
+      },
+      "音频": {
+        "编解码": "ES8388",
+        "功放": "MD8002A",
+        "功放使能": "XL9555 IO0_0 (SPK_EN)",
+        "麦克风": "MIC_P/MIC_N"
+      },
+      "屏幕与TF": {
+        "屏幕": "3.5寸TFT, 双片选 TFT_CS1/TFT_CS2",
+        "TF": "SPI模式, MOSI/MISO/SCK/CS -> IO11/IO13/IO12/IO40",
+        "共享说明": "TF与TFT共享SPI, 同时使用需关注JP1(TFT_MISO); IO40 与 IIC_INT/KEY0 复用"
+      },
+      "USB": {
+        "USB串口": "CH340C + DTR/RTS 自动下载",
+        "原生USB": "USB_D+/USB_D- 直连ESP32-S3"
+      }
+    }
+  },
+  "待确认项": [],
+  "证据摘要": {
+    "page1_主控": [
+      "可见 CH340C, U0_RXD/U0_TXD, BOOT/RESET 自动下载网络",
+      "可见 IO4-IO11 对应 OV_D0-OV_D7",
+      "可见 IIC_SCL/IIC_SDA/IIC_INT 与 XL9555 关系",
+      "可见 USB_D+/USB_D- 与原生USB接口",
+      "可见 RT9013-33GB 生成 3.3V 和 3.3V A"
+    ],
+    "page2_音频": [
+      "可见 ES8388 与 I2S_MCLK/I2S_SCK/I2S_LRCK/I2S_SDIN/I2S_SDOUT",
+      "可见 MD8002A 与 SPK_EN",
+      "可见 AGND 与 3.3V A 模拟域"
+    ],
+    "page3_摄像头": [
+      "可见 OV2640 接口 J15 和 OV_* 网络",
+      "可见 20MHz 有源晶振 Y1 输出 OV_XCLK",
+      "可见 XC6206P282MR 与 XC6219B132MR 两路LDO"
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+menu "Demo App Configuration"
+
+choice APP_PROFILE_CHOICE
+    prompt "Application run profile"
+    default APP_PROFILE_LCD_UI
+    help
+        Select one startup profile for app_main.
+
+config APP_PROFILE_LCD_UI
+    bool "LCD + LVGL UI"
+
+config APP_PROFILE_SENSOR_OLED
+    bool "OLED + DHT11"
+
+config APP_PROFILE_WS2812
+    bool "WS2812 effects"
+
+config APP_PROFILE_EXTI_LED
+    bool "EXTI + LED"
+
+endchoice
+
+config APP_TOUCH_SPI_MODE
+    int "XPT2046 SPI mode"
+    range 0 3
+    default 0
+    help
+        SPI mode for XPT2046 touch controller. If X/Y are fixed or abnormal,
+        try modes 0..3.
+
+menu "Optional Peripheral Features"
+
+config APP_FEATURE_UART1
+    bool "Enable UART1 feature"
+    default n
+    help
+        Enable UART1-related logic. This is used by compile-time pin
+        conflict guards.
+
+config APP_FEATURE_CAMERA
+    bool "Enable camera feature"
+    default n
+    help
+        Enable OV2640 camera-related logic. This is used by compile-time pin
+        conflict guards.
+
+config APP_FEATURE_TF_SD
+    bool "Enable TF/MicroSD feature"
+    default n
+    help
+        Enable TF card-related logic. This is used by compile-time pin
+        conflict guards.
+
+endmenu
+
+endmenu

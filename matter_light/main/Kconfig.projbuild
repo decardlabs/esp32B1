@@ -1,0 +1,17 @@
+menu "Example Configuration"
+
+    config ESP_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            SSID (network name) for the WiFi connection.
+            Leave empty to use Matter commissioning (WiFi credentials
+            provided via BLE during pairing).
+
+    config ESP_WIFI_PASSWORD
+        string "WiFi Password"
+        default ""
+        help
+            WiFi password (if ESP_WIFI_SSID is set).
+
+endmenu

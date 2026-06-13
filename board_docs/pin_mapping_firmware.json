@@ -1,0 +1,153 @@
+{
+  "board": "LYIT_ESP32S3MB",
+  "mcu": "ESP32-S3-WROOM-1",
+  "status": "confirmed_only",
+  "gpio": {
+    "0": "BOOT_KEY|LED0",
+    "1": "TFT_DC",
+    "2": "TFT_PEN",
+    "3": "I2S_MCLK",
+    "4": "OV_D0",
+    "5": "OV_D1",
+    "6": "OV_D2",
+    "7": "OV_D3",
+    "8": "OV_D4",
+    "9": "I2S_LRCK",
+    "10": "I2S_SDIN",
+    "11": "SPI_MOSI|TFT_MOSI",
+    "12": "SPI_SCK|TFT_CLK",
+    "13": "SPI_MISO",
+    "14": "I2S_SDOUT",
+    "15": "UNUSED_FOR_TF_CS",
+    "16": "OV_D5",
+    "17": "OV_D6",
+    "18": "OV_D7",
+    "38": "OV_SCL",
+    "39": "OV_SDA",
+    "45": "OV_PCLK",
+    "46": "I2S_SCK",
+    "47": "OV_VSYNC",
+    "48": "OV_HREF",
+    "40": "IIC_INT|TF_CS|KEY0",
+    "41": "IIC_SDA",
+    "42": "IIC_SCL"
+  },
+  "uart0": {
+    "tx": "U0_TXD",
+    "rx": "U0_RXD",
+    "usb_uart_bridge": "CH340C"
+  },
+  "usb_native": {
+    "dp": "USB_D+",
+    "dm": "USB_D-"
+  },
+  "spi_shared": {
+    "bus": {
+      "mosi": 11,
+      "miso": 13,
+      "sck": 12
+    },
+    "devices": {
+      "tf": {
+        "cs": 40
+      },
+      "tft": {
+        "dc": 1,
+        "cs": [
+          "TFT_CS1",
+          "TFT_CS2"
+        ],
+        "reset_via_expander": "XL9555.P1_0",
+        "backlight_via_expander": "XL9555.P1_1"
+      }
+    },
+    "note": "TF and TFT share SPI. JP1(TFT_MISO) affects coexistence."
+  },
+  "i2c_main": {
+    "scl": 42,
+    "sda": 41,
+    "devices": [
+      "XL9555",
+      "ES8388"
+    ]
+  },
+  "i2s": {
+    "mclk": "I2S_MCLK",
+    "mclk_gpio": 3,
+    "bck": "I2S_SCK",
+    "bck_gpio": 46,
+    "lrck": "I2S_LRCK",
+    "lrck_gpio": 9,
+    "din": "I2S_SDIN",
+    "din_gpio": 10,
+    "dout": "I2S_SDOUT",
+    "dout_gpio": 14
+  },
+  "camera": {
+    "sensor": "OV2640",
+    "data": {
+      "d0": 4,
+      "d1": 5,
+      "d2": 6,
+      "d3": 7,
+      "d4": 8,
+      "d5": 16,
+      "d6": 17,
+      "d7": 18
+    },
+    "sync": {
+      "vsync": 47,
+      "href": 48,
+      "pclk": 45
+    },
+    "power_rails": {
+      "avdd": "LDO_2.8V",
+      "dovdd": "LDO_2.8V",
+      "core_1v3": "LDO_1.3V",
+      "dvdd": "NOT_PRESENT_AS_SEPARATE_NET"
+    },
+    "xclk_source": "external_20mhz_oscillator",
+    "control_via_expander": {
+      "reset": "XL9555.P0_3",
+      "pwdn": "XL9555.P0_2"
+    },
+    "sccb_bus": "separate_from_main_i2c"
+  },
+  "io_expander": {
+    "chip": "XL9555",
+    "address": "0x20",
+    "int_gpio": 40,
+    "ports": {
+      "P0": {
+        "0": "SPK_EN",
+        "1": "BEEP",
+        "2": "OV_PWDN",
+        "3": "OV_RESET",
+        "4": "KEY3",
+        "5": "KEY4",
+        "6": "KEY3",
+        "7": "KEY4"
+      },
+      "P1": {
+        "0": "NC",
+        "1": "TFT_BLK",
+        "2": "NC",
+        "3": "TFT_RES",
+        "4": "LED1",
+        "5": "LED2",
+        "6": "LED3",
+        "7": "LED4"
+      }
+    }
+  },
+  "audio": {
+    "codec": "ES8388",
+    "amp": "MD8002A",
+    "amp_enable": "XL9555.P0_0",
+    "mic": [
+      "MIC_P",
+      "MIC_N"
+    ]
+  },
+  "unresolved": []
+}

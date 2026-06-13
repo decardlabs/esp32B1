@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /dev/tty.* /dev/cu.* 2>/dev/null | grep -i \"usb\\\\|serial\\\\|wch\\\\|slab\\\\|cp210\\\\|ch34\")",
+      "Read(//dev/**)"
+    ]
+  }
+}

@@ -1,0 +1,23 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "i2c_bus.c"
+        "xl9555.c"
+        "es8388.c"
+        "audio_player.c"
+        "http_stream.c"
+        "wifi_mqtt.c"
+        "cmd_handler.c"
+    INCLUDE_DIRS "."
+    PRIV_REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_client
+        esp_driver_i2s
+        esp_driver_gpio
+        esp_driver_i2c
+        json
+        mqtt
+)
