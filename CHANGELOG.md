@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.0 (2026-06-13)
+
+### 🧹 仓库整理
+
+- 扁平化仓库结构：移除嵌入的子模块 .git，所有代码直接纳入版本管理
+- 清理 IDE/AI 工具目录（.codegraph、.workbuddy）不再追踪
+- 清理构建产物（build 目录、build_stale、managed_components）
+- 清理二进制工具文件（*.exe）
+- 添加 .gitattributes：统一文本文件的 LF 换行符
+- 完善 .gitignore：覆盖 IDE、AI 工具、构建产物、二进制文件
+- 移除 pico-fido 遗留的 .gitmodules 配置
+
 ## v0.1.0 (2026-06-13)
 
 ### ✨ 初始发布

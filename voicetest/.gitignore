@@ -1,0 +1,29 @@
+#
+# Voice TTS .gitignore
+#
+
+# Config with API keys (user should copy config_example.py to config.py)
+config.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Generated audio / text files
+doc/*
+!doc/.gitkeep
+
+# Log files
+logs/*
+!logs/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# External reference projects
+/kai-sound-tts/
+/tts_ws_python3_demo/

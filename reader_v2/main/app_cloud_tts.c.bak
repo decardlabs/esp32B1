@@ -1,0 +1,331 @@
+#include "app_cloud_tts.h"
+#include "app_config.h"
+#include "app_tts.h"
+#include "board_pins.h"
+#include "es8388.h"
+
+#include <string.h>
+#include <stdio.h>
+#include "esp_log.h"
+#include "esp_check.h"
+#include "esp_http_client.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "driver/i2s_std.h"
+#include "esp_heap_caps.h"
+
+/* Global config from main.c */
+extern app_config_t g_app_config;
+
+static const char *TAG = "CLOUD_TTS";
+
+/* ── Ring buffer ────────────────────────────────────────────────────── */
+
+#define RING_BUF_SIZE  (32 * 1024)
+
+static uint8_t *s_ring = NULL;
+static volatile size_t s_ring_w = 0;
+static volatile size_t s_ring_r = 0;
+static volatile bool s_ring_done = false;
+static SemaphoreHandle_t s_ring_mutex = NULL;
+
+static void ring_reset(void)
+{
+    s_ring_w = 0;
+    s_ring_r = 0;
+    s_ring_done = false;
+}
+
+static size_t ring_available(void)
+{
+    if (!s_ring_mutex) return 0;
+    xSemaphoreTake(s_ring_mutex, portMAX_DELAY);
+    size_t avail = (s_ring_w >= s_ring_r)
+        ? (s_ring_w - s_ring_r)
+        : (RING_BUF_SIZE - s_ring_r + s_ring_w);
+    xSemaphoreGive(s_ring_mutex);
+    return avail;
+}
+
+static size_t ring_write(const uint8_t *data, size_t len)
+{
+    if (!s_ring_mutex) return 0;
+    xSemaphoreTake(s_ring_mutex, portMAX_DELAY);
+
+    size_t written = 0;
+    while (written < len) {
+        size_t space = (s_ring_r > s_ring_w)
+            ? (s_ring_r - s_ring_w - 1)
+            : (RING_BUF_SIZE - s_ring_w + (s_ring_r > 0 ? s_ring_r - 1 : RING_BUF_SIZE - 1));
+        if (space == 0) break;
+
+        size_t chunk = len - written;
+        size_t contig = RING_BUF_SIZE - s_ring_w;
+        if (chunk > contig) chunk = contig;
+        if (chunk > space) chunk = space;
+
+        memcpy(s_ring + s_ring_w, data + written, chunk);
+        s_ring_w = (s_ring_w + chunk) % RING_BUF_SIZE;
+        written += chunk;
+    }
+
+    xSemaphoreGive(s_ring_mutex);
+    return written;
+}
+
+static size_t ring_read(uint8_t *buf, size_t len)
+{
+    if (!s_ring_mutex) return 0;
+    xSemaphoreTake(s_ring_mutex, portMAX_DELAY);
+
+    size_t read = 0;
+    while (read < len && s_ring_r != s_ring_w) {
+        size_t contig = RING_BUF_SIZE - s_ring_r;
+        size_t chunk = len - read;
+        if (chunk > contig) chunk = contig;
+        size_t avail = (s_ring_w > s_ring_r)
+            ? (s_ring_w - s_ring_r)
+            : (RING_BUF_SIZE - s_ring_r);
+        if (chunk > avail) chunk = avail;
+        if (chunk == 0) break;
+
+        memcpy(buf + read, s_ring + s_ring_r, chunk);
+        s_ring_r = (s_ring_r + chunk) % RING_BUF_SIZE;
+        read += chunk;
+    }
+
+    xSemaphoreGive(s_ring_mutex);
+    return read;
+}
+
+/* ── I2S TX handle ──────────────────────────────────────────────────── */
+
+static i2s_chan_handle_t s_tx_handle = NULL;
+static bool s_cloud_busy = false;
+static volatile bool s_stop_requested = false;
+static cloud_tts_done_cb_t s_done_cb = NULL;
+
+/* ── HTTP data callback ─────────────────────────────────────────────── */
+
+static esp_err_t http_data_cb(esp_http_client_event_t *evt)
+{
+    if (evt->event_id == HTTP_EVENT_ON_DATA) {
+        if (s_stop_requested) return ESP_FAIL;
+        size_t written = ring_write((uint8_t *)evt->data, evt->data_len);
+        if (written < evt->data_len) {
+            ESP_LOGW(TAG, "Ring buffer full, dropped %d bytes",
+                     (int)(evt->data_len - written));
+        }
+    }
+    return ESP_OK;
+}
+
+/* ── Playback task ──────────────────────────────────────────────────── */
+
+static void playback_task(void *arg)
+{
+    (void)arg;
+
+    /* Wait until ring has initial data (>50%) to avoid underrun */
+    while (!s_stop_requested && ring_available() < RING_BUF_SIZE / 2) {
+        if (s_ring_done) break;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    uint8_t buf[512];
+    while (!s_stop_requested) {
+        size_t n = ring_read(buf, sizeof(buf));
+        if (n > 0) {
+            if (s_tx_handle) {
+                i2s_channel_write(s_tx_handle, buf, n, NULL, pdMS_TO_TICKS(200));
+            }
+        } else if (s_ring_done) {
+            break;
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+    }
+
+    /* Drain remaining */
+    uint8_t drain[256];
+    size_t n;
+    do {
+        n = ring_read(drain, sizeof(drain));
+        if (n > 0 && s_tx_handle) {
+            i2s_channel_write(s_tx_handle, drain, n, NULL, pdMS_TO_TICKS(200));
+        }
+    } while (n > 0);
+
+    es8388_stop_playback();
+    s_cloud_busy = false;
+
+    if (s_done_cb) {
+        cloud_tts_done_cb_t cb = s_done_cb;
+        s_done_cb = NULL;
+        cb();
+    }
+
+    vTaskDelete(NULL);
+}
+
+/* ── HTTP request sender ────────────────────────────────────────────── */
+
+static void send_tts_request(const char *text, const char *appid,
+                             const char *token, const char *voice)
+{
+    char reqid[32];
+    snprintf(reqid, sizeof(reqid), "esp_%u", (unsigned)(xTaskGetTickCount()));
+
+    esp_http_client_config_t http_cfg = {
+        .url = "https://openspeech.bytedance.com/api/v1/tts",
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 15000,
+        .buffer_size = 4096,
+        .buffer_size_tx = 1024,
+        .skip_cert_common_name_check = true,
+        .event_handler = http_data_cb,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
+    if (!client) {
+        ESP_LOGE(TAG, "HTTP client init failed");
+        s_cloud_busy = false;
+        if (s_done_cb) {
+            cloud_tts_done_cb_t cb = s_done_cb;
+            s_done_cb = NULL;
+            cb();
+        }
+        return;
+    }
+
+    char auth_header[320];
+    snprintf(auth_header, sizeof(auth_header), "Bearer %s", token);
+
+    char body[1536];
+    snprintf(body, sizeof(body),
+        "{"
+        "\"app\":{\"appid\":\"%s\",\"token\":\"%s\",\"cluster\":\"volcano_tts\"},"
+        "\"user\":{\"uid\":\"esp32s3_001\"},"
+        "\"audio\":{\"voice_type\":\"%s\",\"encoding\":\"pcm\","
+        "\"speed_ratio\":1.0,\"volume_ratio\":1.0,\"pitch_ratio\":1.0},"
+        "\"request\":{\"reqid\":\"%s\",\"text\":\"%s\",\"text_type\":\"plain\",\"operation\":\"query\"}"
+        "}",
+        appid, token, voice, reqid, text);
+
+    esp_http_client_set_header(client, "Authorization", auth_header);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, body, strlen(body));
+
+    ESP_LOGI(TAG, "Sending TTS request (%d bytes body, voice=%s)",
+             (int)strlen(body), voice);
+
+    ring_reset();
+    s_stop_requested = false;
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        int status = esp_http_client_get_status_code(client);
+        ESP_LOGI(TAG, "HTTP status: %d", status);
+    } else {
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+    s_ring_done = true;
+}
+
+/* ── Public API ─────────────────────────────────────────────────────── */
+
+esp_err_t app_cloud_tts_init(void)
+{
+    if (s_ring) return ESP_OK;
+
+    /* I2S is shared with local TTS (app_tts.c). Handle obtained at play time. */
+
+    /* Allocate ring buffer from PSRAM */
+    s_ring = (uint8_t *)heap_caps_malloc(RING_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_ring) return ESP_ERR_NO_MEM;
+    memset(s_ring, 0, RING_BUF_SIZE);
+
+    s_ring_mutex = xSemaphoreCreateMutex();
+    if (!s_ring_mutex) return ESP_ERR_NO_MEM;
+
+    ESP_LOGI(TAG, "Cloud TTS init done (32KB ring buffer, shared I2S)");
+    return ESP_OK;
+}
+
+esp_err_t app_cloud_tts_speak(const char *text, cloud_tts_done_cb_t cb)
+{
+    if (!text || strlen(text) == 0) return ESP_ERR_INVALID_ARG;
+
+    if (s_cloud_busy) {
+        app_cloud_tts_stop();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    s_cloud_busy = true;
+    s_done_cb = cb;
+
+    /* Sanitize text for JSON — escape quotes/backslashes, drop control chars */
+    char safe_text[512];
+    size_t out = 0;
+    for (const char *p = text; *p && out < sizeof(safe_text) - 4; p++) {
+        if (*p == '"' || *p == '\\') {
+            safe_text[out++] = ' ';
+        } else if ((unsigned char)*p < 0x20) {
+            safe_text[out++] = ' ';
+        } else {
+            safe_text[out++] = *p;
+        }
+    }
+    safe_text[out] = '\0';
+
+    if (out == 0) {
+        ESP_LOGW(TAG, "Empty text after sanitization");
+        s_cloud_busy = false;
+        if (cb) cb();
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Get I2S handle from local TTS (shared I2S_NUM_0) */
+    s_tx_handle = (i2s_chan_handle_t)app_tts_get_i2s_handle();
+    if (!s_tx_handle) {
+        ESP_LOGE(TAG, "I2S handle not available from local TTS");
+        s_cloud_busy = false;
+        if (s_done_cb) {
+            cloud_tts_done_cb_t cb = s_done_cb;
+            s_done_cb = NULL;
+            cb();
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Start playback task first (it waits for ring buffer data) */
+    xTaskCreate(playback_task, "cloud_pb", 4096, NULL, 5, NULL);
+
+    /* Enable codec */
+    es8388_start_playback();
+    es8388_set_volume(-12);
+
+    /* Send HTTP request (blocking) */
+    send_tts_request(safe_text,
+                     g_app_config.tts_appid,
+                     g_app_config.tts_token,
+                     g_app_config.tts_voice);
+
+    return ESP_OK;
+}
+
+void app_cloud_tts_stop(void)
+{
+    s_stop_requested = true;
+    s_ring_done = true;
+    s_cloud_busy = false;
+    es8388_stop_playback();
+}
+
+bool app_cloud_tts_is_busy(void)
+{
+    return s_cloud_busy;
+}

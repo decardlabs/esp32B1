@@ -1,0 +1,6 @@
+build/
+build_stale_*/
+managed_components/
+sdkconfig
+sdkconfig.old
+.worktrees/

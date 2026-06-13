@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice TTS - 语音合成工具</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <h1>Voice TTS</h1>
+            <p class="subtitle">多引擎文本转语音工具</p>
+        </header>
+
+        <!-- Main content -->
+        <main class="app-main">
+            <!-- Input section -->
+            <section class="card input-card">
+                <div class="card-header">
+                    <h2>文本输入</h2>
+                </div>
+                <div class="card-body">
+                    <textarea id="textInput" class="text-input" placeholder="请输入要合成语音的文本..." rows="5"></textarea>
+                    <div class="text-info">
+                        <span id="charCount">0</span> / 5000 字符
+                    </div>
+                </div>
+            </section>
+
+            <!-- Options section -->
+            <section class="card options-card">
+                <div class="card-header">
+                    <h2>合成参数</h2>
+                </div>
+                <div class="card-body">
+                    <div class="options-grid">
+                        <div class="form-group">
+                            <label for="engineSelect">TTS 引擎</label>
+                            <select id="engineSelect" class="form-select">
+                                <option value="iflytek">讯飞 TTS</option>
+                                <option value="volcano">火山引擎 TTS</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="voiceSelect">音色</label>
+                            <select id="voiceSelect" class="form-select">
+                                <option value="">加载中...</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="formatSelect">音频格式</label>
+                            <select id="formatSelect" class="form-select">
+                                <option value="">加载中...</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Action -->
+            <button id="generateBtn" class="btn-primary" disabled>
+                <span class="btn-icon">▶</span>
+                <span class="btn-text">生成语音</span>
+            </button>
+
+            <!-- Result section -->
+            <section id="resultSection" class="card result-card" style="display:none;">
+                <div class="card-header">
+                    <h2>合成结果</h2>
+                </div>
+                <div class="card-body">
+                    <div class="audio-player">
+                        <audio id="audioPlayer" controls></audio>
+                    </div>
+                    <div class="result-info" id="resultInfo"></div>
+                    <div class="result-actions">
+                        <a id="downloadLink" class="btn-secondary" download>
+                            <span class="btn-icon">⬇</span> 下载音频
+                        </a>
+                        <button id="copyResultBtn" class="btn-secondary">
+                            <span class="btn-icon">📋</span> 复制文件名
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Logs section -->
+            <section class="card logs-card">
+                <div class="card-header logs-header">
+                    <h2>请求日志</h2>
+                    <button id="clearLogsBtn" class="btn-small">清空</button>
+                </div>
+                <div class="card-body">
+                    <div class="logs-area" id="logsArea">
+                        <div class="logs-placeholder">暂无日志</div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <span>Voice TTS 工具 - 支持讯飞 / 火山引擎</span>
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">检查服务器状态...</span>
+        </footer>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loadingOverlay" class="loading-overlay" style="display:none;">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">正在生成语音...</div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>

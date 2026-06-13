@@ -1,0 +1,8 @@
+{
+    "name": "kai-sound-local/php-server",
+    "description": "ESP32 Sound Box - local PHP HTTP API to MQTT controller",
+    "require": {
+        "php": ">=7.4",
+        "php-mqtt/client": "^2.0"
+    }
+}

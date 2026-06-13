@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kai TTS Console</title>
+<style>
+:root {
+  --bg: #09111f;
+  --panel: rgba(17, 26, 43, 0.94);
+  --panel-soft: #15223a;
+  --line: #2c3f61;
+  --text: #edf4ff;
+  --muted: #90a3c4;
+  --blue: #2b79ff;
+  --green: #159f70;
+  --amber: #c78219;
+  --red: #d74949;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top, rgba(43, 121, 255, 0.16), transparent 34%),
+    linear-gradient(180deg, #09111f 0%, #0d1627 100%);
+  color: var(--text);
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  padding: 28px 16px 42px;
+}
+
+.wrap {
+  width: 100%;
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.hero {
+  margin-bottom: 18px;
+}
+
+.hero h1 {
+  font-size: 34px;
+  line-height: 1.12;
+  margin-bottom: 6px;
+}
+
+.hero p {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 18px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+}
+
+.card.full {
+  grid-column: 1 / -1;
+}
+
+.card h2 {
+  font-size: 18px;
+  margin-bottom: 14px;
+}
+
+.status-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.status-box {
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.status-box .label {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.status-box .value {
+  font-size: 15px;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.field {
+  margin-bottom: 14px;
+}
+
+.field label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+input[type="text"],
+input[type="url"],
+select,
+textarea {
+  width: 100%;
+  background: #0b1526;
+  border: 1px solid #375077;
+  border-radius: 12px;
+  color: var(--text);
+  padding: 12px 14px;
+  font: inherit;
+}
+
+textarea {
+  min-height: 144px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+input[type="range"] {
+  width: 100%;
+}
+
+.range-row {
+  display: grid;
+  grid-template-columns: 1fr 62px;
+  gap: 12px;
+  align-items: center;
+}
+
+.range-value {
+  text-align: right;
+  font-weight: 700;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+button {
+  border: 0;
+  border-radius: 12px;
+  padding: 12px 16px;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.primary { background: var(--blue); }
+.success { background: var(--green); }
+.warning { background: var(--amber); }
+.danger { background: var(--red); }
+.ghost { background: #314562; }
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 14px;
+  margin-top: 8px;
+}
+
+.switch-row input {
+  width: 18px;
+  height: 18px;
+}
+
+.inline-note,
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 6px;
+}
+
+.log-panel {
+  background: #08101d;
+  border: 1px solid #273955;
+  border-radius: 12px;
+  min-height: 280px;
+  max-height: 420px;
+  overflow: auto;
+  padding: 12px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.log-entry {
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(144, 163, 196, 0.14);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-entry:last-child {
+  border-bottom: 0;
+}
+
+.log-time { color: #81b1ff; }
+.log-info { color: #d4e0f4; }
+.log-success { color: #7fe2b4; }
+.log-error { color: #ff9393; }
+
+@media (max-width: 860px) {
+  .grid,
+  .row,
+  .status-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .hero h1 {
+    font-size: 28px;
+  }
+}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <section class="hero">
+    <h1>Kai TTS Console</h1>
+    <p>网页发送文本，火山引擎流式合成，ESP32 拉流播放。</p>
+  </section>
+
+  <section class="card full">
+    <h2>状态</h2>
+    <div class="status-strip">
+      <div class="status-box">
+        <div class="label">设备 ID</div>
+        <div class="value" id="statusDeviceId">esp32_01</div>
+      </div>
+      <div class="status-box">
+        <div class="label">接口状态</div>
+        <div class="value" id="apiStatus">idle</div>
+      </div>
+      <div class="status-box">
+        <div class="label">最近命令</div>
+        <div class="value" id="lastCommand">none</div>
+      </div>
+      <div class="status-box">
+        <div class="label">当前 TTS</div>
+        <div class="value">Volcengine Streaming</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <section class="card">
+      <h2>TTS 播报</h2>
+
+      <div class="field">
+        <label for="deviceId">目标设备</label>
+        <input id="deviceId" type="text" value="esp32_01" placeholder="例如 esp32_01">
+      </div>
+
+      <div class="field">
+        <label for="ttsText">播报内容</label>
+        <textarea id="ttsText" placeholder="输入要播报的文本"></textarea>
+        <div class="inline-note"><span id="textCount">0</span> 字</div>
+      </div>
+
+      <div class="toolbar">
+        <button class="success" id="btnTtsPlay">发送播报</button>
+        <button class="ghost" id="btnTtsClear">清空文本</button>
+        <button class="danger" id="btnStop">停止播放</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>播报参数</h2>
+
+      <div class="row">
+        <div class="field">
+          <label for="voice">音色</label>
+          <select id="voice">
+            <option value="zh_female_vv_uranus_bigtts">zh_female_vv_uranus_bigtts</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="format">格式</label>
+          <select id="format">
+            <option value="mp3">mp3</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="speechRate">语速</label>
+        <div class="range-row">
+          <input id="speechRate" type="range" min="-500" max="500" value="0">
+          <div class="range-value" id="speechRateValue">0</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="pitchRate">语调</label>
+        <div class="range-row">
+          <input id="pitchRate" type="range" min="-500" max="500" value="0">
+          <div class="range-value" id="pitchRateValue">0</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="ttsVolume">播报音量</label>
+        <div class="range-row">
+          <input id="ttsVolume" type="range" min="0" max="100" value="80">
+          <div class="range-value" id="ttsVolumeValue">80</div>
+        </div>
+      </div>
+
+      <label class="switch-row">
+        <input id="playImmediately" type="checkbox" checked>
+        <span>生成后立即推送到设备</span>
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>设备控制</h2>
+
+      <div class="field">
+        <label for="audioUrl">音频 URL</label>
+        <input id="audioUrl" type="url" placeholder="输入 http:// 开头的 MP3/WAV 地址">
+      </div>
+
+      <div class="toolbar" style="margin-bottom: 14px;">
+        <button class="primary" id="btnPlayUrl">播放 URL</button>
+        <button class="warning" id="btnPause">暂停</button>
+        <button class="primary" id="btnResume">继续</button>
+      </div>
+
+      <div class="field">
+        <label for="deviceVolume">设备音量</label>
+        <div class="range-row">
+          <input id="deviceVolume" type="range" min="0" max="100" value="80">
+          <div class="range-value" id="deviceVolumeValue">80%</div>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <button class="success" id="btnTone">测试音</button>
+        <button class="ghost" id="btnStatus">刷新状态</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>请求预览</h2>
+
+      <div class="field">
+        <label for="lastTtsPayload">最近一次 TTS 请求</label>
+        <textarea id="lastTtsPayload" readonly placeholder="这里会显示最近一次请求参数"></textarea>
+      </div>
+
+      <p class="hint">日志用于快速确认请求、状态轮询和错误信息。</p>
+    </section>
+
+    <section class="card full">
+      <h2>运行日志</h2>
+      <div class="toolbar" style="margin-bottom: 12px;">
+        <button class="ghost" id="btnClearLog">清空日志</button>
+      </div>
+      <div class="log-panel" id="logPanel"></div>
+    </section>
+  </section>
+</main>
+
+<script>
+const COMMAND_ENDPOINT = '/api/command.php';
+const TTS_ENDPOINT = '/api/tts.php';
+const TTS_STATUS_ENDPOINT = '/api/tts-status.php';
+const MAX_LOG_ENTRIES = 120;
+let volumeTimer = null;
+let ttsStatusTimer = null;
+let lastTtsStage = '';
+
+function nowTime() {
+  return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+function getDeviceId() {
+  return document.getElementById('deviceId').value.trim() || 'esp32_01';
+}
+
+function updateStatusDevice() {
+  document.getElementById('statusDeviceId').textContent = getDeviceId();
+}
+
+function setApiStatus(text) {
+  document.getElementById('apiStatus').textContent = text;
+}
+
+function setLastCommand(text) {
+  document.getElementById('lastCommand').textContent = text || 'none';
+}
+
+function appendLog(type, title, detail) {
+  const panel = document.getElementById('logPanel');
+  const entry = document.createElement('div');
+  const colorClass = type === 'error' ? 'log-error' : (type === 'success' ? 'log-success' : 'log-info');
+
+  entry.className = 'log-entry';
+  entry.innerHTML =
+    '<span class="log-time">[' + nowTime() + ']</span> ' +
+    '<span class="' + colorClass + '">' + escapeHtml(title) + '</span>' +
+    (detail ? '<div>' + escapeHtml(detail) + '</div>' : '');
+
+  panel.prepend(entry);
+
+  while (panel.children.length > MAX_LOG_ENTRIES) {
+    panel.removeChild(panel.lastChild);
+  }
+}
+
+async function sendCommand(cmd, params) {
+  const body = {
+    device_id: getDeviceId(),
+    cmd: cmd,
+    params: params || {}
+  };
+
+  updateStatusDevice();
+  setApiStatus('sending');
+  appendLog('info', 'Send command: ' + cmd, JSON.stringify(body, null, 2));
+
+  try {
+    const response = await fetch(COMMAND_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || 'request failed');
+    }
+
+    setApiStatus('ok');
+    setLastCommand(cmd);
+    appendLog('success', 'Command success: ' + cmd, JSON.stringify(result, null, 2));
+    return result;
+  } catch (err) {
+    setApiStatus('error');
+    appendLog('error', 'Command failed: ' + cmd, err.message || String(err));
+    throw err;
+  }
+}
+
+function syncRangeValue(rangeId, labelId, suffix) {
+  const input = document.getElementById(rangeId);
+  const label = document.getElementById(labelId);
+
+  function render() {
+    label.textContent = input.value + (suffix || '');
+  }
+
+  input.addEventListener('input', render);
+  render();
+}
+
+function updateTextCount() {
+  document.getElementById('textCount').textContent = document.getElementById('ttsText').value.length;
+}
+
+function collectTtsPayload() {
+  return {
+    device_id: getDeviceId(),
+    text: document.getElementById('ttsText').value.trim(),
+    voice: document.getElementById('voice').value,
+    format: document.getElementById('format').value,
+    speech_rate: parseInt(document.getElementById('speechRate').value, 10),
+    pitch_rate: parseInt(document.getElementById('pitchRate').value, 10),
+    volume: parseInt(document.getElementById('ttsVolume').value, 10),
+    play_immediately: document.getElementById('playImmediately').checked
+  };
+}
+
+function renderTtsPayload() {
+  const payload = collectTtsPayload();
+  document.getElementById('lastTtsPayload').value = JSON.stringify(payload, null, 2);
+  return payload;
+}
+
+async function watchTtsStatus(requestId) {
+  if (!requestId) {
+    return;
+  }
+
+  if (ttsStatusTimer) {
+    clearInterval(ttsStatusTimer);
+    ttsStatusTimer = null;
+  }
+  lastTtsStage = '';
+
+  const poll = async function() {
+    try {
+      const response = await fetch(TTS_STATUS_ENDPOINT + '?request_id=' + encodeURIComponent(requestId), { cache: 'no-store' });
+      const result = await response.json();
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || 'status request failed');
+      }
+
+      const status = result.status || {};
+      const stage = status.stage || 'unknown';
+      const line =
+        'stage=' + stage +
+        ', chunks=' + (status.chunk_count || 0) +
+        ', bytes=' + (status.audio_bytes || 0) +
+        ', voice=' + (result.voice_used || '');
+
+      if (stage !== lastTtsStage) {
+        appendLog('info', 'TTS stream status', line);
+        lastTtsStage = stage;
+      }
+
+      if (stage === 'finished') {
+        appendLog('success', 'TTS stream finished', line);
+        clearInterval(ttsStatusTimer);
+        ttsStatusTimer = null;
+      } else if (stage === 'error') {
+        appendLog('error', 'TTS stream error', status.message || line);
+        clearInterval(ttsStatusTimer);
+        ttsStatusTimer = null;
+      }
+    } catch (err) {
+      appendLog('error', 'TTS status polling failed', err.message || String(err));
+      clearInterval(ttsStatusTimer);
+      ttsStatusTimer = null;
+    }
+  };
+
+  await poll();
+  ttsStatusTimer = setInterval(poll, 1200);
+}
+
+document.getElementById('deviceId').addEventListener('input', function() {
+  updateStatusDevice();
+  renderTtsPayload();
+});
+
+document.getElementById('ttsText').addEventListener('input', function() {
+  updateTextCount();
+  renderTtsPayload();
+});
+
+document.getElementById('voice').addEventListener('change', renderTtsPayload);
+document.getElementById('format').addEventListener('change', renderTtsPayload);
+document.getElementById('speechRate').addEventListener('input', renderTtsPayload);
+document.getElementById('pitchRate').addEventListener('input', renderTtsPayload);
+document.getElementById('ttsVolume').addEventListener('input', renderTtsPayload);
+document.getElementById('playImmediately').addEventListener('change', renderTtsPayload);
+
+document.getElementById('btnPlayUrl').addEventListener('click', async function() {
+  const url = document.getElementById('audioUrl').value.trim();
+  if (!url) {
+    appendLog('error', 'URL playback blocked', 'Please input an audio URL first.');
+    return;
+  }
+
+  try {
+    await sendCommand('play', { url: url });
+  } catch (err) {}
+});
+
+document.getElementById('btnPause').addEventListener('click', async function() {
+  try {
+    await sendCommand('pause');
+  } catch (err) {}
+});
+
+document.getElementById('btnResume').addEventListener('click', async function() {
+  try {
+    await sendCommand('resume');
+  } catch (err) {}
+});
+
+document.getElementById('btnStop').addEventListener('click', async function() {
+  try {
+    await sendCommand('stop');
+  } catch (err) {}
+});
+
+document.getElementById('btnTone').addEventListener('click', async function() {
+  try {
+    await sendCommand('tone', { freq: 1000, duration: 1200 });
+  } catch (err) {}
+});
+
+document.getElementById('btnStatus').addEventListener('click', async function() {
+  try {
+    await sendCommand('status');
+  } catch (err) {}
+});
+
+document.getElementById('deviceVolume').addEventListener('input', function() {
+  const volume = parseInt(this.value, 10);
+  document.getElementById('deviceVolumeValue').textContent = volume + '%';
+  if (volumeTimer) {
+    clearTimeout(volumeTimer);
+  }
+  volumeTimer = setTimeout(async function() {
+    try {
+      await sendCommand('volume', { value: volume });
+    } catch (err) {}
+  }, 200);
+});
+
+document.getElementById('btnTtsPlay').addEventListener('click', async function() {
+  const payload = renderTtsPayload();
+  if (!payload.text) {
+    appendLog('error', 'TTS request blocked', 'Please input some text first.');
+    return;
+  }
+
+  updateStatusDevice();
+  setApiStatus('tts sending');
+  setLastCommand('tts');
+  appendLog('info', 'Send TTS request', JSON.stringify(payload, null, 2));
+
+  try {
+    const response = await fetch(TTS_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || 'tts request failed');
+    }
+
+    setApiStatus('tts ok');
+    appendLog('success', 'TTS ready', JSON.stringify(result, null, 2));
+    if (result.tts && result.tts.request_id) {
+      watchTtsStatus(result.tts.request_id);
+    }
+  } catch (err) {
+    setApiStatus('tts error');
+    appendLog('error', 'TTS failed', err.message || String(err));
+  }
+});
+
+document.getElementById('btnTtsClear').addEventListener('click', function() {
+  document.getElementById('ttsText').value = '';
+  updateTextCount();
+  renderTtsPayload();
+  appendLog('info', 'TTS text cleared', '');
+});
+
+document.getElementById('btnClearLog').addEventListener('click', function() {
+  document.getElementById('logPanel').innerHTML = '';
+  appendLog('info', 'Log cleared', '');
+});
+
+syncRangeValue('speechRate', 'speechRateValue', '');
+syncRangeValue('pitchRate', 'pitchRateValue', '');
+syncRangeValue('ttsVolume', 'ttsVolumeValue', '');
+updateStatusDevice();
+updateTextCount();
+renderTtsPayload();
+document.getElementById('deviceVolumeValue').textContent = document.getElementById('deviceVolume').value + '%';
+appendLog('info', 'Page loaded', 'Provider: Volcengine Streaming TTS');
+</script>
+</body>
+</html>

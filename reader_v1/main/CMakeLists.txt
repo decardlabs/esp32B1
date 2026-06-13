@@ -1,0 +1,30 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "lcd_st7796.c"
+        "bsp_spi.c"
+        "sd_card.c"
+        "tusb_msc.c"
+        "i2c_bus.c"
+        "xl9555.c"
+        "es8388.c"
+        "app_buttons.c"
+        "app_tts.c"
+        "app_display.c"
+        "lv_font_xiaozhi_cn_16.c"
+    INCLUDE_DIRS "."
+    PRIV_REQUIRES
+        tinyusb
+        usb
+        fatfs
+        sdmmc
+        nvs_flash
+        esp_driver_sdspi
+        esp_driver_spi
+        esp_driver_i2s
+        esp_lcd
+        lvgl
+        espressif__esp-sr
+    EMBED_FILES
+        ../managed_components/espressif__esp-sr/esp-tts/esp_tts_chinese/esp_tts_voice_data_xiaole.dat
+)
