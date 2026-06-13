@@ -1,0 +1,36 @@
+idf_component_register(
+    SRCS
+        main.c
+        config_parser.c
+        app_wifi.c
+        task_audio_capture.c
+        task_volc_asr.c
+        task_volc_llm.c
+        task_qa_lvgl.c
+        task_sdcard.c
+        task_ws2812.c
+        task_timer.c
+        lv_font_xiaozhi_cn_16.c
+    INCLUDE_DIRS
+        .
+        include
+        ../components/bsp/include
+        ../components/device/include
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_http_client
+        esp-tls
+        mbedtls
+        lvgl
+        json
+        bsp
+        device
+        esp_driver_i2c
+        esp_driver_gpio
+        esp_driver_spi
+        esp_lcd
+        led_strip
+        fatfs
+        sdmmc
+)
