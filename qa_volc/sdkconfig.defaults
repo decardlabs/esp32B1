@@ -12,7 +12,6 @@ CONFIG_SPIRAM_USE_CAPS_ALLOC=y
 
 # LVGL large font support (required for Chinese font)
 CONFIG_LV_FONT_FMT_TXT_LARGE=y
-CONFIG_LV_FONT_SIMSUN_16_CJK=y
 
 # TLS: skip server cert verification for Volcengine HTTPS API
 CONFIG_ESP_TLS_INSECURE=y
@@ -21,6 +20,6 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 # ark.cn-beijing.volces.com requires TLS 1.3 + TLS_AES_256_GCM_SHA384
 CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
 
-# Debug: mbedtls verbose debug output for TLS troubleshooting
+# Dev debug: mbedtls TLS handshake logging (remove for production)
 CONFIG_MBEDTLS_DEBUG=y
 CONFIG_MBEDTLS_DEBUG_LEVEL_WARN=y

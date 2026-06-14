@@ -53,7 +53,8 @@ The Python venv needs `requests` installed (`pip install requests`).
 |------|-------|----------|------|-------------|
 | `qa_lvgl_task` | 8192 | 5 | 1 | LVGL UI + SPI SD card I/O + audio save bridge |
 | `volc_asr` | 8192 | 5 | any | Volcengine Flash ASR: base64→HTTP→parse result |
-| `volc_llm` | 16384 | 5 | any | Volcengine Ark Chat Completions: SSE streaming |
+| `volc_llm` | 16384 | 5 | any | LLM Chat Completions: SSE streaming |
+| `volc_tts` | 16384 | 5 | any | TTS: HTTP SSE → base64 decode → I2S playback |
 | `audio_capture` | 8192 | 5 | any | KEY3 triggered I2S capture + real-time 24k→16k conversion |
 | `ws2812_task` | 6144 | 10 | any | WS2812 LED strip control |
 
@@ -66,6 +67,7 @@ KEY3 press
   → ASR task: base64 encode → HTTPS POST → parse → volc_llm_submit()
   → LLM task: HTTPS POST with SSE streaming → parse delta tokens → qa_ui_add_assistant_msg()
   → LVGL task: display tokens on screen
+  → TTS task (triggered from LLM task): HTTPS SSE → base64 decode → mono→stereo → I2S playback
 ```
 
 ### Key Design Decisions
@@ -75,6 +77,14 @@ KEY3 press
 - **Large buffer handling**: cJSON can't handle 85KB+ base64 strings. The ASR JSON request body is built with snprintf directly, not cJSON.
 - **LLM API**: Uses Chat Completions format (`messages` array) via `/api/v3/chat/completions` (auto-converted from `/api/v3/responses` in config). SSE parsing handles both Chat Completions (`choices[0].delta.content`) and Responses API (`response.output_text.delta`) formats.
 - **PSRAM for large allocations**: All audio buffers (>64KB) use `heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`.
+
+### Key Mappings
+
+| Key | Short Press | Long Press (>1.5s) |
+|-----|-------------|-------------------|
+| KEY1 | Scroll up （↑) + beep | — |
+| KEY3 | Record (hold to speak) | — |
+| KEY4 | Scroll down (↓) + beep | Clear dialog (two beeps) |
 
 ### Config (SD Card)
 
