@@ -6,6 +6,7 @@ idf_component_register(
         task_audio_capture.c
         task_volc_asr.c
         task_volc_llm.c
+        task_volc_tts.c
         task_qa_lvgl.c
         task_sdcard.c
         task_ws2812.c

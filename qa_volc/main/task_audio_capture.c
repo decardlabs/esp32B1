@@ -101,7 +101,7 @@ static void audio_capture_task(void *pv_params)
         qa_ui_add_log("[MIC] 开始录音");
 
         /* Capture audio to PSRAM buffer, converting 24kHz stereo → 16kHz mono on-the-fly */
-        #define CAPTURE_BUF_SAMPLES  80000  /* ~5 seconds of 16kHz mono output */
+        #define CAPTURE_BUF_SAMPLES  480000  /* ~30 seconds of 16kHz mono output */
         int16_t *audio_buf = heap_caps_malloc(CAPTURE_BUF_SAMPLES * sizeof(int16_t),
                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (audio_buf) {

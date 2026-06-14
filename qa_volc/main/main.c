@@ -18,6 +18,7 @@
 #include "task_audio_capture.h"
 #include "task_volc_asr.h"
 #include "task_volc_llm.h"
+#include "task_volc_tts.h"
 #include "task_ws2812.h"
 #include "esp_heap_caps.h"
 
@@ -64,6 +65,13 @@ static void log_stack_watermarks(void) {
                      names[i], w * sizeof(StackType_t));
         }
     }
+}
+
+static void beep_feedback(uint32_t ms)
+{
+    xl9555_set_pin_level(BEEP_PORT, BEEP_PIN, 0);  /* beep ON (active LOW) */
+    vTaskDelay(pdMS_TO_TICKS(ms));
+    xl9555_set_pin_level(BEEP_PORT, BEEP_PIN, 1);  /* beep OFF */
 }
 
 void app_main(void) {
@@ -152,6 +160,7 @@ void app_main(void) {
     audio_capture_task_create(&s_config);
     volc_asr_task_create(&s_config);
     volc_llm_task_create(&s_config);
+    volc_tts_task_create(&s_config);
     ws2812_task_create();
     ESP_LOGI(TAG, "All worker tasks created");
 
@@ -168,20 +177,22 @@ void app_main(void) {
     TickType_t key4_press_tick = 0;
 
     while (1) {
-        // KEY1 — scroll UP
+        // KEY1 — scroll UP with beep
         bool key1_level;
         xl9555_get_pin_level(KEY_PORT, KEY1_PIN, &key1_level);
         if (key1_level == 0) {
+            beep_feedback(20);
             qa_ui_scroll(-1);
-            vTaskDelay(pdMS_TO_TICKS(200));
+            vTaskDelay(pdMS_TO_TICKS(250));
         }
 
-        // KEY4 — short press: scroll DOWN; long press (>1.5s): clear dialog
+        // KEY4 — short press: scroll DOWN with beep; long press (>1.5s): clear dialog
         bool key4_level;
         xl9555_get_pin_level(KEY_PORT, KEY4_PIN, &key4_level);
         if (key4_level == 0 && !key4_was_pressed) {
             key4_was_pressed = true;
             key4_press_tick = xTaskGetTickCount();
+            beep_feedback(20);
         } else if (key4_level != 0 && key4_was_pressed) {
             // Released: if less than 1.5s, scroll down
             if ((xTaskGetTickCount() - key4_press_tick) < pdMS_TO_TICKS(1500)) {
@@ -191,9 +202,11 @@ void app_main(void) {
         } else if (key4_level == 0 && key4_was_pressed) {
             // Still pressed: check for long press
             if ((xTaskGetTickCount() - key4_press_tick) >= pdMS_TO_TICKS(1500)) {
+                beep_feedback(50);
+                beep_feedback(50);
                 qa_ui_clear_all();
                 qa_ui_add_log("[CLR] 对话已清除");
-                key4_was_pressed = false;  // prevent repeat
+                key4_was_pressed = false;
                 vTaskDelay(pdMS_TO_TICKS(500));
             }
         }
@@ -207,13 +220,13 @@ void app_main(void) {
             }
         }
 
-        // OOM check every ~5 seconds
+        // OOM check every ~30 seconds (low threshold: TLS peaks at ~7KB internal)
         static int oom_tick = 0;
-        if (++oom_tick >= 100) {
+        if (++oom_tick >= 600) {
             oom_tick = 0;
             size_t int_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
             size_t int_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-            if (int_free < 30 * 1024 || int_largest < 24 * 1024) {
+            if (int_free < 5 * 1024 || int_largest < 4 * 1024) {
                 ESP_LOGW(TAG, "OOM detected: int_free=%d int_largest=%d", int_free, int_largest);
                 if (qa_degrade_step_up() != ESP_OK) {
                     ESP_DRAM_LOGE(TAG, "OOM critical: cannot degrade further");

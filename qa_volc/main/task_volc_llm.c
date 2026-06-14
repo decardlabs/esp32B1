@@ -28,6 +28,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "task_qa_lvgl.h"
+#include "task_volc_tts.h"
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                         */
@@ -397,6 +398,15 @@ static void process_question(const char *question,
         ESP_LOGI(TAG, "LLM answer complete (%zu bytes)", sse_ctx.len);
         qa_ui_add_log("[OK] 回答完成");
         qa_ui_set_status("回答完成");
+
+        /* Trigger TTS playback */
+        if (sse_ctx.len > 0) {
+            answer[sse_ctx.len] = '\0';
+            esp_err_t tts_err = volc_tts_speak(answer);
+            if (tts_err != ESP_OK) {
+                ESP_LOGW(TAG, "volc_tts_speak: %s", esp_err_to_name(tts_err));
+            }
+        }
     } else if (sse_ctx.error) {
         ESP_LOGW(TAG, "LLM stream interrupted by transport error (got %zu bytes before drop)",
                  sse_ctx.len);

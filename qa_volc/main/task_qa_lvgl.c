@@ -141,8 +141,8 @@ static volatile bool s_save_active = false;
 
 /* Last assistant label — for SSE append */
 static lv_obj_t *s_last_assistant_label = NULL;
-/* Scroll offset for KEY3/KEY4 */
-static int s_scroll_offset = 0;
+/* Accumulated assistant text (avoids lv_label_get_text quirk) */
+static char s_assistant_buf[4096];
 
 /* ================== Forward declarations ============= */
 static void lvgl_task_entry(void *arg);
@@ -258,7 +258,6 @@ void qa_ui_clear_all(void)
     if (!s_qa_queue) return;
 
     s_last_assistant_label = NULL;
-    s_scroll_offset = 0;
 
     qa_msg_t msg = { .type = QA_MSG_CLEAR };
     xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(50));
@@ -268,11 +267,9 @@ void qa_ui_scroll(int direction)
 {
     if (!s_qa_queue) return;
 
-    qa_msg_t msg = {
-        .type = QA_MSG_SCROLL,
-        .text[0] = (char)direction,
-        .text[1] = '\0',
-    };
+    qa_msg_t msg = { .type = QA_MSG_SCROLL };
+    msg.text[0] = (direction < 0) ? 'U' : 'D';
+    msg.text[1] = '\0';
     xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(50));
 }
 
@@ -514,6 +511,7 @@ static void qa_ui_process_msg(const qa_msg_t *msg)
             s_chat_placeholder = NULL;
         }
         s_last_assistant_label = NULL;
+        s_assistant_buf[0] = '\0';
         {
             lv_obj_t *l = lv_label_create(s_chat_cont);
             lv_label_set_text(l, msg->text);
@@ -550,29 +548,21 @@ static void qa_ui_process_msg(const qa_msg_t *msg)
             s_chat_placeholder = NULL;
         }
         if (s_last_assistant_label == NULL) {
-            /* First token: create label */
+            /* First token: create label + init buffer */
             lv_obj_t *l = lv_label_create(s_chat_cont);
-            lv_label_set_text(l, msg->text);
             lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_text_color(l, lv_color_hex(COL_ASSISTANT), 0);
             lv_obj_set_style_text_font(l, qa_font_get(), 0);
             lv_obj_set_width(l, LCD_ST7796_H_RES - 8);
             s_last_assistant_label = l;
-        } else {
-            /* Subsequent tokens: append to existing label */
-            const char *cur = lv_label_get_text(s_last_assistant_label);
-            size_t cur_len = strlen(cur);
-            size_t add_len = strlen(msg->text);
-            if (cur_len + add_len < 4096) {
-                char *buf = heap_caps_malloc(cur_len + add_len + 1,
-                                              MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-                if (buf) {
-                    memcpy(buf, cur, cur_len);
-                    memcpy(buf + cur_len, msg->text, add_len + 1);
-                    lv_label_set_text(s_last_assistant_label, buf);
-                    heap_caps_free(buf);
-                }
-            }
+            s_assistant_buf[0] = '\0';
+        }
+        /* Append to accumulated buffer and update label text */
+        size_t cur_len = strlen(s_assistant_buf);
+        size_t add_len = strnlen(msg->text, sizeof(msg->text));
+        if (cur_len + add_len < sizeof(s_assistant_buf)) {
+            memcpy(s_assistant_buf + cur_len, msg->text, add_len + 1);
+            lv_label_set_text(s_last_assistant_label, s_assistant_buf);
         }
         lv_obj_scroll_to_y(s_chat_cont, LV_COORD_MAX, LV_ANIM_OFF);
         break;
@@ -606,6 +596,8 @@ static void qa_ui_process_msg(const qa_msg_t *msg)
         /* Wipe chat and log panels */
         lv_obj_clean(s_chat_cont);
         lv_obj_clean(s_log_cont);
+        s_last_assistant_label = NULL;
+        s_assistant_buf[0] = '\0';
 
         /* Restore chat placeholder */
         s_chat_placeholder = lv_label_create(s_chat_cont);
@@ -623,10 +615,13 @@ static void qa_ui_process_msg(const qa_msg_t *msg)
         break;
 
     case QA_MSG_SCROLL: {
-        int dir = msg->text[0];
         lv_coord_t cur = lv_obj_get_scroll_y(s_chat_cont);
-        lv_coord_t step = 40;  /* pixels per button press */
-        lv_obj_scroll_to_y(s_chat_cont, cur + dir * step, LV_ANIM_OFF);
+        lv_coord_t step = 40;
+        if (msg->text[0] == 'U') {
+            lv_obj_scroll_to_y(s_chat_cont, cur - step, LV_ANIM_OFF);
+        } else {
+            lv_obj_scroll_to_y(s_chat_cont, cur + step, LV_ANIM_OFF);
+        }
         break;
     }
     }
