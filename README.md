@@ -19,18 +19,19 @@
 | [tts_mqtt](tts_mqtt) | MQTT 远程 TTS 播报（Web → MQTT → ESP32 播报） |
 | [reader_v2](reader_v2) | 语音朗读器 v2：本地 + 云端 TTS，自动降级 |
 | [xiaozhi](xiaozhi) | 小智 AI 综合终端：人脸识别 / 摄像头 / 云端 TTS |
+| [qa_volc](qa_volc) | 火山引擎智能问答：语音识别 + LLM 大模型 + TTS 语音合成 |
 | [tts_reader](tts_reader) | TTS 朗读基础版：TF 卡 TXT 朗读 + 音量 / 语速调节 |
 | [esp32code](esp32code) | ESP-IDF 入门学习例程（GPIO / EXTI / 任务等） |
 | [kai-sound-tts](kai-sound-tts) | Web → PHP → Python → MQTT → ESP32 云端 TTS 方案 |
 | [voicetest](voicetest) | 多引擎 Web TTS 工具（讯飞 / 火山引擎） |
+| [pico-fido](pico-fido) | RP2040 FIDO2/U2F 安全密钥 |
+| [docs](docs) | 开发文档和资料 |
 
 ## 快速开始
 
 ```bash
 # 以 reader_v2 为例
 cd reader_v2
-idf.py set-target esp32s3
-idf.py menuconfig
 idf.py build flash monitor
 ```
 
@@ -38,4 +39,4 @@ idf.py build flash monitor
 
 ## 版本
 
-当前版本：**v0.1.0** — 初始发布，收录 11 个 demo 应用及配套工具。
+当前版本：**v0.2.0** — 新增 qa_volc 智能问答项目。[更新日志](docs/CHANGELOG.md)
