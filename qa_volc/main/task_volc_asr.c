@@ -96,6 +96,7 @@ static esp_err_t resp_ctx_init(asr_resp_ctx_t *ctx)
 {
     ctx->data = heap_caps_malloc(ASR_BUF_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (ctx->data == NULL) {
+        ESP_DRAM_LOGE(TAG, "resp_ctx_init: heap_caps_malloc(%d) failed", ASR_BUF_SIZE);
         return ESP_ERR_NO_MEM;
     }
     ctx->data[0] = '\0';
@@ -107,7 +108,9 @@ static esp_err_t resp_ctx_init(asr_resp_ctx_t *ctx)
 
 static void resp_ctx_cleanup(asr_resp_ctx_t *ctx)
 {
-    free(ctx->data);
+    if (ctx->data) {
+        heap_caps_free(ctx->data);
+    }
     ctx->data = NULL;
     ctx->len = 0;
     ctx->cap = 0;
@@ -251,16 +254,15 @@ static const char *extract_asr_text(const cJSON *root)
 /*  Core ASR request logic                                             */
 /* ------------------------------------------------------------------ */
 
+/* Forward declarations */
+static void process_wav_data(uint8_t *wav_data, size_t file_size,
+                              const char *api_key,
+                              const char *resource_id);
+
 /**
  * @brief Process a single WAV file through the Volcengine Flash ASR API.
  *
- * Steps:
- *   1. Read the WAV file from the SD card.
- *   2. Base64-encode the entire file content.
- *   3. Build a JSON request payload.
- *   4. Send HTTP POST to the Volcengine ASR endpoint.
- *   5. Parse the response and extract the recognized text.
- *   6. Display the result on the UI and forward it to the LLM task.
+ * Steps: read file → delegate to process_wav_data for base64 → HTTP → parse.
  */
 static void process_wav_file(const char *wav_path,
                              const char *api_key,
@@ -268,14 +270,6 @@ static void process_wav_file(const char *wav_path,
 {
     FILE *f = NULL;
     uint8_t *wav_data = NULL;
-    uint8_t *b64_data = NULL;
-    char uuid_str[40];
-    cJSON *root = NULL;
-    char *json_str = NULL;
-    esp_http_client_handle_t client = NULL;
-    asr_resp_ctx_t resp_ctx;
-    long http_status = 0;
-    char dur_buf[24] = "";
 
     /* ------------------------------------------------------------------ */
     /*  1. Read the WAV file                                              */
@@ -310,7 +304,7 @@ static void process_wav_file(const char *wav_path,
         ESP_LOGE(TAG, "fread failed for %s", wav_path);
         qa_ui_add_log("[ERR] 读取音频文件失败");
         fclose(f);
-        free(wav_data);
+        heap_caps_free(wav_data);
         return;
     }
     fclose(f);
@@ -318,16 +312,34 @@ static void process_wav_file(const char *wav_path,
 
     ESP_LOGI(TAG, "Read WAV: %s (%ld bytes)", wav_path, file_size);
 
-    /* ------------------------------------------------------------------ */
-    /*  2. Base64-encode the WAV data via mbedtls                         */
-    /* ------------------------------------------------------------------ */
+    process_wav_data(wav_data, (size_t)file_size, api_key, resource_id);
+}
+
+/**
+ * @brief Process raw WAV audio data through the Volcengine ASR API.
+ *
+ * Steps: base64 → JSON → HTTP → parse → display → forward to LLM.
+ * This is the shared backend for both file-based and in-memory submissions.
+ */
+static void process_wav_data(uint8_t *wav_data, size_t file_size,
+                              const char *api_key,
+                              const char *resource_id)
+{
+    uint8_t *b64_data = NULL;
+    char uuid_str[40];
+    cJSON *root = NULL;
+    char *json_str = NULL;
+    esp_http_client_handle_t client = NULL;
+    asr_resp_ctx_t resp_ctx;
+    long http_status = 0;
+    char dur_buf[24] = "";
     size_t b64_len = 0;
 
     int mret = mbedtls_base64_encode(NULL, 0, &b64_len, wav_data, file_size);
     if (mret != 0 && mret != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL) {
         ESP_LOGE(TAG, "mbedtls_base64_encode (query) failed: %d", mret);
         qa_ui_add_log("[ERR] Base64编码失败");
-        free(wav_data);
+        heap_caps_free(wav_data);
         return;
     }
 
@@ -335,7 +347,7 @@ static void process_wav_file(const char *wav_path,
     if (b64_data == NULL) {
         ESP_LOGE(TAG, "malloc(%zu) for base64 data failed", b64_len + 1);
         qa_ui_add_log("[ERR] 内存不足");
-        free(wav_data);
+        heap_caps_free(wav_data);
         return;
     }
 
@@ -343,65 +355,60 @@ static void process_wav_file(const char *wav_path,
     if (mret != 0) {
         ESP_LOGE(TAG, "mbedtls_base64_encode failed: %d", mret);
         qa_ui_add_log("[ERR] Base64编码失败");
-        free(b64_data);
-        free(wav_data);
+        heap_caps_free(b64_data);
+        heap_caps_free(wav_data);
         return;
     }
     b64_data[b64_len] = '\0';
 
-    free(wav_data);
+    heap_caps_free(wav_data);
     wav_data = NULL;
 
     ESP_LOGI(TAG, "Base64 output: %zu bytes", b64_len);
 
     /* ------------------------------------------------------------------ */
-    /*  3. Build JSON request payload                                     */
+    /*  3. Build JSON request payload (manual string — cJSON can't handle */
+    /*     85 KB base64 in a single value)                                 */
     /* ------------------------------------------------------------------ */
     generate_uuid(uuid_str, sizeof(uuid_str));
 
-    root = cJSON_CreateObject();
-    if (root == NULL) {
-        qa_ui_add_log("[ERR] JSON创建失败");
-        free(b64_data);
-        return;
-    }
-
-    /* user */
-    cJSON *user_obj = cJSON_AddObjectToObject(root, "user");
-    if (user_obj) {
-        cJSON_AddStringToObject(user_obj, "uid", "anonymous");
-    }
-
-    /* audio */
-    cJSON *audio_obj = cJSON_AddObjectToObject(root, "audio");
-    if (audio_obj) {
-        cJSON_AddStringToObject(audio_obj, "data", (const char *)b64_data);
-        cJSON_AddStringToObject(audio_obj, "format", "wav");
-        cJSON_AddNumberToObject(audio_obj, "rate", 16000);
-        cJSON_AddNumberToObject(audio_obj, "bits", 16);
-        cJSON_AddNumberToObject(audio_obj, "channel", 1);
-    }
-
-    /* request */
-    cJSON *request_obj = cJSON_AddObjectToObject(root, "request");
-    if (request_obj) {
-        cJSON_AddStringToObject(request_obj, "model_name", "bigmodel");
-        cJSON_AddBoolToObject(request_obj, "enable_punc", true);
-        cJSON_AddBoolToObject(request_obj, "enable_itn", true);
-    }
-
-    json_str = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    root = NULL;
-
+    size_t json_cap = b64_len + 256;
+    json_str = (char *)heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json_str == NULL) {
-        ESP_LOGE(TAG, "cJSON_PrintUnformatted failed");
-        qa_ui_add_log("[ERR] JSON序列化失败");
-        free(b64_data);
+        ESP_LOGE(TAG, "malloc(%zu) for JSON failed", json_cap);
+        qa_ui_add_log("[ERR] 内存不足");
+        heap_caps_free(b64_data);
         return;
     }
 
-    ESP_LOGI(TAG, "Request body: %zu bytes", strlen(json_str));
+    int written = snprintf(json_str, json_cap,
+        "{"
+          "\"user\":{\"uid\":\"anonymous\"},"
+          "\"audio\":{"
+            "\"data\":\"%s\","
+            "\"format\":\"wav\","
+            "\"rate\":16000,"
+            "\"bits\":16,"
+            "\"channel\":1"
+          "},"
+          "\"request\":{"
+            "\"model_name\":\"bigmodel\","
+            "\"enable_punc\":true,"
+            "\"enable_itn\":true"
+          "}"
+        "}",
+        (const char *)b64_data);
+
+    if (written < 0 || (size_t)written >= json_cap) {
+        ESP_LOGE(TAG, "JSON truncated: %d >= %zu", written, json_cap);
+        heap_caps_free(json_str);
+        json_str = NULL;
+        heap_caps_free(b64_data);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Request body: %d bytes (json)", written);
+    ESP_LOGD(TAG, "JSON prefix: %.80s", json_str);
 
     /* ------------------------------------------------------------------ */
     /*  4. Send HTTP POST                                                 */
@@ -412,7 +419,7 @@ static void process_wav_file(const char *wav_path,
         ESP_LOGE(TAG, "resp_ctx_init failed");
         qa_ui_add_log("[ERR] 内存不足");
         free(json_str);
-        free(b64_data);
+        heap_caps_free(b64_data);
         return;
     }
 
@@ -423,6 +430,7 @@ static void process_wav_file(const char *wav_path,
         .buffer_size    = ASR_BUF_SIZE,
         .event_handler  = http_event_handler,
         .user_data      = (void *)&resp_ctx,
+        .skip_cert_common_name_check = true,
     };
 
     client = esp_http_client_init(&http_cfg);
@@ -431,7 +439,7 @@ static void process_wav_file(const char *wav_path,
         qa_ui_add_log("[ERR] HTTP客户端初始化失败");
         resp_ctx_cleanup(&resp_ctx);
         free(json_str);
-        free(b64_data);
+        heap_caps_free(b64_data);
         return;
     }
 
@@ -456,7 +464,7 @@ static void process_wav_file(const char *wav_path,
         esp_http_client_cleanup(client);
         resp_ctx_cleanup(&resp_ctx);
         free(json_str);
-        free(b64_data);
+        heap_caps_free(b64_data);
         return;
     }
 
@@ -476,7 +484,7 @@ static void process_wav_file(const char *wav_path,
         esp_http_client_cleanup(client);
         resp_ctx_cleanup(&resp_ctx);
         free(json_str);
-        free(b64_data);
+        heap_caps_free(b64_data);
         return;
     }
 
@@ -490,7 +498,7 @@ static void process_wav_file(const char *wav_path,
         esp_http_client_cleanup(client);
         resp_ctx_cleanup(&resp_ctx);
         free(json_str);
-        free(b64_data);
+        heap_caps_free(b64_data);
         return;
     }
 
@@ -504,12 +512,12 @@ static void process_wav_file(const char *wav_path,
         }
         ESP_LOGE(TAG, "ASR API error: code=%s, msg=%s",
                  resp_ctx.api_status_code, msg);
-        qa_ui_add_log("[ERR] ASR失败: %s", msg);
+        qa_ui_add_log("[ERR] ASR失败(%s)", resp_ctx.api_status_code);
         cJSON_Delete(root);
         esp_http_client_cleanup(client);
         resp_ctx_cleanup(&resp_ctx);
         free(json_str);
-        free(b64_data);
+        heap_caps_free(b64_data);
         return;
     }
 
@@ -522,7 +530,7 @@ static void process_wav_file(const char *wav_path,
         esp_http_client_cleanup(client);
         resp_ctx_cleanup(&resp_ctx);
         free(json_str);
-        free(b64_data);
+        heap_caps_free(b64_data);
         return;
     }
 
@@ -537,6 +545,11 @@ static void process_wav_file(const char *wav_path,
         }
     }
 
+    /* Copy result text before deleting root — result_text points into cJSON tree */
+    char asr_result[1024];
+    strncpy(asr_result, result_text, sizeof(asr_result) - 1);
+    asr_result[sizeof(asr_result) - 1] = '\0';
+
     cJSON_Delete(root);
     root = NULL;
 
@@ -545,9 +558,9 @@ static void process_wav_file(const char *wav_path,
     /* ------------------------------------------------------------------ */
     qa_ui_add_log("[ASR] 识别完成 %s", dur_buf);
     qa_ui_set_status("识别完成");
-    qa_ui_add_user_msg(result_text);
+    qa_ui_add_user_msg(asr_result);
 
-    err = volc_llm_submit(result_text);
+    err = volc_llm_submit(asr_result);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "volc_llm_submit returned %s", esp_err_to_name(err));
     }
@@ -558,7 +571,7 @@ static void process_wav_file(const char *wav_path,
     esp_http_client_cleanup(client);
     resp_ctx_cleanup(&resp_ctx);
     free(json_str);
-    free(b64_data);
+    heap_caps_free(b64_data);
 }
 
 /* ------------------------------------------------------------------ */
@@ -582,11 +595,16 @@ static void volc_asr_task(void *pv_params)
 
     ESP_LOGI(TAG, "Volcengine ASR task started (resource_id=%s)", resource_id);
 
-    char wav_path[ASR_WAV_PATH_MAX];
+    asr_queue_item_t item;
 
     while (1) {
-        if (xQueueReceive(s_asr_queue, wav_path, portMAX_DELAY) == pdTRUE) {
-            process_wav_file(wav_path, api_key, resource_id);
+        if (xQueueReceive(s_asr_queue, &item, portMAX_DELAY) == pdTRUE) {
+            if (item.from_file) {
+                process_wav_file(item.wav_path, api_key, resource_id);
+            } else {
+                process_wav_data(item.data, item.data_len, api_key, resource_id);
+                /* NOT freeing item.data here — process_wav_data already frees it */
+            }
         }
     }
 }
@@ -597,7 +615,7 @@ static void volc_asr_task(void *pv_params)
 
 BaseType_t volc_asr_task_create(const config_t *cfg)
 {
-    s_asr_queue = xQueueCreate(ASR_QUEUE_LEN, ASR_WAV_PATH_MAX);
+    s_asr_queue = xQueueCreate(ASR_QUEUE_LEN, sizeof(asr_queue_item_t));
     if (s_asr_queue == NULL) {
         ESP_LOGE(TAG, "Failed to create ASR queue");
         return pdFAIL;
@@ -613,10 +631,48 @@ esp_err_t volc_asr_submit(const char *wav_path)
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (xQueueSend(s_asr_queue, wav_path, pdMS_TO_TICKS(100)) == pdTRUE) {
+    asr_queue_item_t item = {
+        .from_file = true,
+        .data = NULL,
+        .data_len = 0,
+    };
+    strncpy(item.wav_path, wav_path, sizeof(item.wav_path) - 1);
+    item.wav_path[sizeof(item.wav_path) - 1] = '\0';
+
+    if (xQueueSend(s_asr_queue, &item, pdMS_TO_TICKS(100)) == pdTRUE) {
         return ESP_OK;
     }
 
     ESP_LOGW(TAG, "ASR queue full, dropping: %s", wav_path);
+    return ESP_ERR_TIMEOUT;
+}
+
+esp_err_t volc_asr_submit_data(const uint8_t *data, size_t len)
+{
+    if (s_asr_queue == NULL || data == NULL || len == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Copy the data — ASR task will free it after processing */
+    uint8_t *copy = heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (copy == NULL) {
+        ESP_LOGE(TAG, "malloc(%zu) for ASR data copy failed", len);
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(copy, data, len);
+
+    asr_queue_item_t item = {
+        .from_file = false,
+        .data = copy,
+        .data_len = len,
+    };
+    item.wav_path[0] = '\0';
+
+    if (xQueueSend(s_asr_queue, &item, pdMS_TO_TICKS(100)) == pdTRUE) {
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "ASR queue full, dropping data (%zu bytes)", len);
+    heap_caps_free(copy);
     return ESP_ERR_TIMEOUT;
 }

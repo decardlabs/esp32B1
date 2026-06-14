@@ -35,12 +35,12 @@
 
 static const char *TAG = "VOLC_LLM";
 
-#define LLM_TASK_STACK            8192
+#define LLM_TASK_STACK            16384
 #define LLM_TASK_PRIO             5
 #define LLM_QUEUE_LEN             4
 #define LLM_QUESTION_MAX          1024
 #define LLM_HTTP_TIMEOUT_MS       60000
-#define LLM_READ_BUF_SIZE         256
+#define LLM_READ_BUF_SIZE         4096
 #define LLM_SSE_LINE_MAX          4096
 
 /* ------------------------------------------------------------------ */
@@ -85,7 +85,7 @@ static void process_sse_data(const char *data_str,
 {
     cJSON *root;
     cJSON *type;
-    cJSON *delta;
+    cJSON *delta = NULL;
     size_t dlen;
     char *new_answer;
 
@@ -100,12 +100,43 @@ static void process_sse_data(const char *data_str,
     }
 
     type = cJSON_GetObjectItem(root, "type");
+
+    /* Check for Chat Completions format (no "type" field, uses "choices") */
     if (type == NULL || !cJSON_IsString(type) || type->valuestring == NULL) {
+        /* Chat Completions SSE: {"choices":[{"delta":{"content":"..."},"index":0}]} */
+        cJSON *cc_choices = cJSON_GetObjectItem(root, "choices");
+        if (cJSON_IsArray(cc_choices) && cJSON_GetArraySize(cc_choices) > 0) {
+            cJSON *first = cJSON_GetArrayItem(cc_choices, 0);
+            if (first) {
+                /* Check finish_reason == "stop" or "length" */
+                cJSON *fr = cJSON_GetObjectItem(first, "finish_reason");
+                if (cJSON_IsString(fr) && fr->valuestring != NULL
+                    && (strcmp(fr->valuestring, "stop") == 0
+                        || strcmp(fr->valuestring, "length") == 0)) {
+                    *done = true;
+                    cJSON_Delete(root);
+                    return;
+                }
+                /* Extract delta.content */
+                cJSON *delta_obj = cJSON_GetObjectItem(first, "delta");
+                if (delta_obj) {
+                    delta = cJSON_GetObjectItem(delta_obj, "content");
+                }
+            }
+        }
+        if (delta != NULL && cJSON_IsString(delta) && delta->valuestring != NULL) {
+            dlen = strlen(delta->valuestring);
+            if (dlen == 0) {
+                cJSON_Delete(root);
+                return;
+            }
+            goto append_delta;
+        }
         cJSON_Delete(root);
         return;
     }
 
-    /* ---- response.output_text.delta ---- */
+    /* ---- Responses API: response.output_text.delta ---- */
     if (strcmp(type->valuestring, "response.output_text.delta") == 0) {
         delta = cJSON_GetObjectItem(root, "delta");
         if (delta != NULL && cJSON_IsString(delta) && delta->valuestring != NULL) {
@@ -114,52 +145,120 @@ static void process_sse_data(const char *data_str,
                 cJSON_Delete(root);
                 return;
             }
-
-            /* Grow answer buffer if needed */
-            if (*len + dlen + 1 > *cap) {
-                /* Double until sufficient */
-                do {
-                    *cap *= 2;
-                } while (*cap < *len + dlen + 1);
-
-                new_answer = heap_caps_realloc(*answer, *cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                if (new_answer == NULL) {
-                    ESP_LOGE(TAG, "realloc answer failed (needed %zu)", *cap);
-                    cJSON_Delete(root);
-                    return;
-                }
-                *answer = new_answer;
-            }
-
-            memcpy(*answer + *len, delta->valuestring, dlen);
-            *len += dlen;
-            (*answer)[*len] = '\0';
-
-            /* Stream the delta token to the UI in real-time */
-            qa_ui_add_assistant_msg(delta->valuestring);
+            goto append_delta;
         }
     }
-    /* ---- response.done ---- */
+    /* ---- Responses API: response.done ---- */
     else if (strcmp(type->valuestring, "response.done") == 0) {
         *done = true;
     }
 
     cJSON_Delete(root);
+    return;
+
+    /* Shared: append delta token to answer buffer */
+append_delta:
+    if (*len + dlen + 1 > *cap) {
+        do {
+            *cap *= 2;
+        } while (*cap < *len + dlen + 1);
+
+        new_answer = heap_caps_realloc(*answer, *cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (new_answer == NULL) {
+            ESP_LOGE(TAG, "realloc answer failed (needed %zu)", *cap);
+            cJSON_Delete(root);
+            return;
+        }
+        *answer = new_answer;
+    }
+
+    memcpy(*answer + *len, delta->valuestring, dlen);
+    *len += dlen;
+    (*answer)[*len] = '\0';
+
+    /* Stream the delta token to the UI in real-time */
+    qa_ui_add_assistant_msg(delta->valuestring);
+
+    cJSON_Delete(root);
 }
+
+/* ------------------------------------------------------------------ */
+/*  SSE context for event-driven HTTP                                  */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char  *answer;          /* accumulated answer (realloc'd) */
+    size_t len;             /* current length */
+    size_t cap;             /* allocated capacity */
+    bool   stream_done;     /* set on "response.done" */
+    bool   error;           /* set on transport error */
+} llm_sse_ctx_t;
 
 /* ------------------------------------------------------------------ */
 /*  Core LLM request logic                                            */
 /* ------------------------------------------------------------------ */
 
 /**
+ * @brief HTTP event handler — accumulates SSE response data.
+ *
+ * Called by esp_http_client_perform() for each chunk of the response body.
+ * Reuses the existing process_sse_data() for SSE event parsing.
+ */
+static esp_err_t llm_http_event_handler(esp_http_client_event_t *evt)
+{
+    llm_sse_ctx_t *ctx = (llm_sse_ctx_t *)evt->user_data;
+    if (ctx == NULL) return ESP_OK;
+
+    switch (evt->event_id) {
+
+    case HTTP_EVENT_ON_DATA:
+        if (evt->data == NULL || evt->data_len == 0) break;
+
+        for (int i = 0; i < evt->data_len; i++) {
+            char c = ((const char *)evt->data)[i];
+
+            if (c == '\n') {
+                sse_line[sse_line_len] = '\0';
+
+                if (strncmp(sse_line, "data: ", 6) == 0) {
+                    process_sse_data(sse_line + 6,
+                                     &ctx->answer, &ctx->len, &ctx->cap,
+                                     &ctx->stream_done);
+                }
+
+                sse_line_reset();
+            } else if (sse_line_len < LLM_SSE_LINE_MAX - 1) {
+                sse_line[sse_line_len++] = c;
+            }
+        }
+        break;
+
+    case HTTP_EVENT_ON_FINISH:
+        if (!ctx->stream_done) {
+            ESP_LOGW(TAG, "SSE stream finished without response.done");
+        }
+        break;
+
+    case HTTP_EVENT_ERROR:
+        ESP_LOGW(TAG, "HTTP transport error during SSE read");
+        ctx->error = true;
+        break;
+
+    default:
+        break;
+    }
+
+    return ESP_OK;
+}
+
+/**
  * @brief Send a single question to the Responses API and stream the answer.
  *
  * Steps:
  *   1. Build JSON request body with model, stream=true, and input.
- *   2. Open HTTP connection, write request body, fetch response headers.
- *   3. Read the SSE stream incrementally via esp_http_client_read().
- *   4. Parse each SSE event and stream delta tokens to the UI.
- *   5. On completion or error, log the outcome and update status.
+ *   2. POST via esp_http_client_perform() with SSE event handler.
+ *   3. Parse SSE events and stream delta tokens to the UI.
+ *   4. On completion or error, log the outcome and update status.
  */
 static void process_question(const char *question,
                               const char *api_key,
@@ -168,18 +267,12 @@ static void process_question(const char *question,
 {
     esp_http_client_handle_t client = NULL;
     char *answer = NULL;
-    size_t answer_len = 0;
     size_t answer_cap = 1024;
-    bool stream_done = false;
     long http_status = 0;
-    int written;
     char auth_header[512];
+    llm_sse_ctx_t sse_ctx;
 
     cJSON *root           = NULL;
-    cJSON *input_arr      = NULL;
-    cJSON *msg_obj        = NULL;
-    cJSON *content_arr    = NULL;
-    cJSON *content_item   = NULL;
     char  *json_str       = NULL;
 
     /* ------------------------------------------------------------------ */
@@ -194,26 +287,16 @@ static void process_question(const char *question,
 
     cJSON_AddStringToObject(root, "model", model);
     cJSON_AddBoolToObject(root, "stream", true);
+    cJSON_AddNumberToObject(root, "max_tokens", 512);
 
-    /* "input": [ { "role": "user", "content": [ { "type": "input_text", "text": "..." } ] } ] */
-    input_arr = cJSON_AddArrayToObject(root, "input");
-    if (input_arr != NULL) {
-        msg_obj = cJSON_CreateObject();
+    /* Chat Completions format: {"messages":[{"role":"user","content":"..."}]} */
+    cJSON *msgs_arr = cJSON_AddArrayToObject(root, "messages");
+    if (msgs_arr != NULL) {
+        cJSON *msg_obj = cJSON_CreateObject();
         if (msg_obj != NULL) {
             cJSON_AddStringToObject(msg_obj, "role", "user");
-
-            content_arr = cJSON_AddArrayToObject(msg_obj, "content");
-            if (content_arr != NULL) {
-                content_item = cJSON_CreateObject();
-                if (content_item != NULL) {
-                    cJSON_AddStringToObject(content_item, "type", "input_text");
-                    cJSON_AddStringToObject(content_item, "text", question);
-                    cJSON_AddItemToArray(content_arr, content_item);
-                    content_item = NULL;  /* ownership transferred */
-                }
-            }
-            cJSON_AddItemToArray(input_arr, msg_obj);
-            msg_obj = NULL;  /* ownership transferred */
+            cJSON_AddStringToObject(msg_obj, "content", question);
+            cJSON_AddItemToArray(msgs_arr, msg_obj);
         }
     }
 
@@ -240,16 +323,23 @@ static void process_question(const char *question,
     answer[0] = '\0';
 
     /* ------------------------------------------------------------------ */
-    /*  2. Initialise HTTP client and send request                         */
+    /*  2. Initialise SSE context and HTTP client                          */
     /* ------------------------------------------------------------------ */
+
+    memset(&sse_ctx, 0, sizeof(sse_ctx));
+    sse_ctx.answer = answer;
+    sse_ctx.cap    = answer_cap;
 
     esp_http_client_config_t http_cfg = {
         .url            = endpoint,
         .method         = HTTP_METHOD_POST,
         .timeout_ms     = LLM_HTTP_TIMEOUT_MS,
         .buffer_size    = LLM_READ_BUF_SIZE,
-        .buffer_size_tx = 512,
-        .is_async       = false,
+        .buffer_size_tx = LLM_READ_BUF_SIZE,
+        .skip_cert_common_name_check = true,
+        .keep_alive_enable = false,
+        .event_handler  = llm_http_event_handler,
+        .user_data      = (void *)&sse_ctx,
     };
 
     client = esp_http_client_init(&http_cfg);
@@ -261,125 +351,71 @@ static void process_question(const char *question,
         return;
     }
 
-    /* Set headers */
+    /* Set headers and post body */
     esp_http_client_set_header(client, "Content-Type", "application/json");
     snprintf(auth_header, sizeof(auth_header), "Bearer %s", api_key);
     esp_http_client_set_header(client, "Authorization", auth_header);
+    esp_http_client_set_post_field(client, json_str, strlen(json_str));
+
+    /* ------------------------------------------------------------------ */
+    /*  3. Perform HTTP request (TLS handshake + write + SSE streaming)    */
+    /* ------------------------------------------------------------------ */
 
     qa_ui_add_log("[LLM] 正在请求...");
     qa_ui_set_status("思考中...");
+    sse_line_reset();
 
-    /*
-     * Open the connection.  esp_http_client_open() sends the request line
-     * and headers and returns immediately.  We then write the body.
-     */
-    esp_err_t err = esp_http_client_open(client, strlen(json_str));
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP open failed: %s", esp_err_to_name(err));
-        qa_ui_add_log("[ERR] 网络不可用");
-        qa_ui_set_status("网络不可用");
-        goto cleanup;
-    }
+    esp_err_t err = esp_http_client_perform(client);
 
-    written = esp_http_client_write(client, json_str, strlen(json_str));
-    if (written < 0 || (size_t)written != strlen(json_str)) {
-        ESP_LOGE(TAG, "HTTP write failed: written=%d", written);
-        qa_ui_add_log("[ERR] 网络不可用");
-        qa_ui_set_status("网络不可用");
-        esp_http_client_close(client);
-        goto cleanup;
-    }
-
-    /* Read response headers (may block until server starts responding) */
-    esp_http_client_fetch_headers(client);
+    /* After perform, the SSE stream is fully consumed */
     http_status = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "HTTP status: %ld, err=%s", http_status, esp_err_to_name(err));
 
-    ESP_LOGI(TAG, "HTTP status: %ld", http_status);
+    /* ------------------------------------------------------------------ */
+    /*  4. Check result                                                    */
+    /* ------------------------------------------------------------------ */
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+        qa_ui_add_log("[ERR] 网络不可用");
+        qa_ui_set_status("网络不可用");
+        goto cleanup;
+    }
 
     if (http_status != 200) {
         ESP_LOGE(TAG, "HTTP error: %ld", http_status);
         qa_ui_add_log("[ERR] LLM错误 (%ld)", http_status);
         qa_ui_set_status("LLM错误");
-        esp_http_client_close(client);
         goto cleanup;
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  3. SSE streaming read loop                                        */
-    /* ------------------------------------------------------------------ */
+    /* Update answer pointer (may have been realloc'd by process_sse_data) */
+    answer = sse_ctx.answer;
+    answer_cap = sse_ctx.cap;
 
-    {
-        char buf[LLM_READ_BUF_SIZE];
-        int  read_len;
-
-        sse_line_reset();
-        qa_ui_set_status("回答中...");
-
-        while (!stream_done) {
-            read_len = esp_http_client_read(client, buf, sizeof(buf) - 1);
-            if (read_len < 0) {
-                ESP_LOGE(TAG, "HTTP read error: %d", read_len);
-                qa_ui_add_log("[ERR] 网络不可用");
-                qa_ui_set_status("网络不可用");
-                break;
-            }
-            if (read_len == 0) {
-                /* Connection closed by server or timeout; stop reading */
-                ESP_LOGI(TAG, "HTTP read returned 0 (EOF or timeout)");
-                break;
-            }
-
-            buf[read_len] = '\0';
-
-            /* Character-by-character SSE line parsing */
-            for (int i = 0; i < read_len; i++) {
-                char c = buf[i];
-
-                if (c == '\n') {
-                    /* End of line: process if it is a "data: " line */
-                    sse_line[sse_line_len] = '\0';
-
-                    if (strncmp(sse_line, "data: ", 6) == 0) {
-                        process_sse_data(sse_line + 6,
-                                         &answer, &answer_len, &answer_cap,
-                                         &stream_done);
-                    }
-                    /* Lines that do not start with "data: " (e.g. empty
-                     * keep-alive lines, comments) are silently ignored. */
-
-                    sse_line_reset();
-                } else if (sse_line_len < LLM_SSE_LINE_MAX - 1) {
-                    sse_line[sse_line_len++] = c;
-                }
-                /* else: line too long, silently drop excess characters */
-            }
+    if (sse_ctx.stream_done) {
+        ESP_LOGI(TAG, "LLM answer complete (%zu bytes)", sse_ctx.len);
+        qa_ui_add_log("[OK] 回答完成");
+        qa_ui_set_status("回答完成");
+    } else if (sse_ctx.error) {
+        ESP_LOGW(TAG, "LLM stream interrupted by transport error (got %zu bytes before drop)",
+                 sse_ctx.len);
+        if (sse_ctx.len > 0) {
+            qa_ui_add_log("[WARN] 网络中断，回答不完整");
+        } else {
+            qa_ui_add_log("[ERR] 网络不可用");
         }
-
-        esp_http_client_close(client);
-    }
-
-    /* ------------------------------------------------------------------ */
-    /*  4. Finalise                                                        */
-    /* ------------------------------------------------------------------ */
-
-    if (stream_done) {
-        ESP_LOGI(TAG, "LLM answer complete (%zu bytes)", answer_len);
+        qa_ui_set_status(sse_ctx.len > 0 ? "回答不完整" : "网络不可用");
+    } else if (sse_ctx.len > 0) {
+        ESP_LOGW(TAG, "LLM stream ended without stop event (%zu bytes received)",
+                 sse_ctx.len);
         qa_ui_add_log("[OK] 回答完成");
         qa_ui_set_status("回答完成");
     } else {
-        if (answer_len > 0) {
-            /* Partial answer received but stream terminated early */
-            ESP_LOGW(TAG, "LLM stream ended before response.done (%zu bytes)",
-                     answer_len);
-            qa_ui_add_log("[WARN] 回答不完整");
-            qa_ui_set_status("回答不完整");
-        } else if (http_status == 200) {
-            /* Connection opened and 200 returned, but no data arrived */
-            ESP_LOGW(TAG, "LLM timeout (no SSE data received)");
-            qa_ui_add_log("[ERR] LLM超时");
-            qa_ui_set_status("LLM超时");
-        }
-        /* If http_status != 200, the error was already reported above */
+        ESP_LOGW(TAG, "LLM: no SSE data received (server returned HTTP %ld)",
+                 http_status);
+        qa_ui_add_log("[ERR] LLM超时");
+        qa_ui_set_status("LLM超时");
     }
 
     /* ------------------------------------------------------------------ */
@@ -402,7 +438,8 @@ static void volc_llm_task(void *pv_params)
 {
     const config_t *cfg = (const config_t *)pv_params;
 
-    /* Validate required config keys */
+    /* Read endpoint.  Supports both full URL (LLM_ENDPOINT) and
+     * base URL (LLM_BASE_URL, appended with /v1/chat/completions). */
     const char *endpoint = config_get_string(cfg, "LLM_ENDPOINT", NULL);
     if (endpoint == NULL) {
         ESP_LOGE(TAG, "LLM_ENDPOINT not found in config");
@@ -427,14 +464,15 @@ static void volc_llm_task(void *pv_params)
         return;
     }
 
-    ESP_LOGI(TAG, "Volcengine LLM task started (endpoint=%s, model=%s)",
+    ESP_LOGI(TAG, "LLM task started (endpoint=%s, model=%s)",
              endpoint, model);
+    const char *ep = endpoint;
 
     char question[LLM_QUESTION_MAX];
 
     while (1) {
         if (xQueueReceive(s_llm_queue, question, portMAX_DELAY) == pdTRUE) {
-            process_question(question, api_key, endpoint, model);
+            process_question(question, api_key, ep, model);
         }
     }
 }

@@ -17,21 +17,31 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 
 #include "lvgl.h"
 #include "lcd_st7796.h"
 #include "task_qa_lvgl.h"
+#include "task_volc_asr.h"
 
 /* ===================== Fonts ========================= */
+/* xiaozhi 16 CJK — regenerated with 4754 common Chinese characters */
 LV_FONT_DECLARE(lv_font_xiaozhi_cn_16);
+
+static const lv_font_t *qa_font_get(void)
+{
+    return &lv_font_xiaozhi_cn_16;
+}
 
 /* ===================== Constants ===================== */
 static const char *TAG = "QA_LVGL";
@@ -58,21 +68,40 @@ static const char *TAG = "QA_LVGL";
 /* ===================== Colors ======================== */
 #define COL_BG          0x05050A
 #define COL_BAR         0x0D1B2A
-#define COL_TITLE       0xD9E2F0
+#define COL_TITLE       0xFFFFFF
 #define COL_WIFI_ON     0x67E8F9
-#define COL_USER        0x63A7FF
-#define COL_ASSISTANT   0x63E59C
-#define COL_LOG         0x8FA3C2
-#define COL_STATUS      0xA8B6C9
+#define COL_USER        0xFFFFFF
+#define COL_ASSISTANT   0xFFFFFF
+#define COL_LOG         0xFFFFFF
+#define COL_STATUS      0xFFFFFF
 #define COL_PANEL       0x0C1018
 
 /* ====================== Types ======================== */
+typedef struct __attribute__((packed)) {
+    char     riff[4];
+    uint32_t file_size;
+    char     wave[4];
+    char     fmt[4];
+    uint32_t fmt_size;
+    uint16_t format;
+    uint16_t channels;
+    uint32_t sample_rate;
+    uint32_t byte_rate;
+    uint16_t block_align;
+    uint16_t bits_per_sample;
+    char     data[4];
+    uint32_t data_size;
+} wav_header_t;
+
 typedef enum {
     QA_MSG_USER,
     QA_MSG_ASSISTANT,
+    QA_MSG_ASSISTANT_APPEND,
     QA_MSG_LOG,
     QA_MSG_STATUS,
     QA_MSG_CLEAR,
+    QA_MSG_AUDIO_SAVE,
+    QA_MSG_SCROLL,
 } qa_msg_type_t;
 
 typedef struct {
@@ -106,6 +135,15 @@ static lv_obj_t *s_bot_bar         = NULL;
 static lv_obj_t *s_status_label    = NULL;
 static lv_obj_t *s_hint_label      = NULL;
 
+/* Audio save request (set by audio_capture task, processed by LVGL task) */
+static audio_save_req_t *s_save_req = NULL;
+static volatile bool s_save_active = false;
+
+/* Last assistant label — for SSE append */
+static lv_obj_t *s_last_assistant_label = NULL;
+/* Scroll offset for KEY3/KEY4 */
+static int s_scroll_offset = 0;
+
 /* ================== Forward declarations ============= */
 static void lvgl_task_entry(void *arg);
 static void lvgl_tick_cb(void *arg);
@@ -116,6 +154,7 @@ static bool lvgl_trans_done_cb(esp_lcd_panel_io_handle_t panel_io,
                                void *user_ctx);
 static void lvgl_create_ui(void);
 static void qa_ui_process_msg(const qa_msg_t *msg);
+static void do_audio_save(audio_save_req_t *req);
 
 /* ================================================================
  *  Public API
@@ -130,7 +169,7 @@ esp_err_t lcd_lvgl_reserve_buffer(void)
     s_display_buf = (lv_color_t *)heap_caps_malloc(LCD_BUF_SIZE,
                                                     MALLOC_CAP_DMA);
     if (!s_display_buf) {
-        ESP_LOGE(TAG, "Failed to allocate display buffer (%d bytes) "
+        ESP_DRAM_LOGE(TAG, "Failed to allocate display buffer (%d bytes) "
                  "from DMA-capable memory", LCD_BUF_SIZE);
         return ESP_ERR_NO_MEM;
     }
@@ -179,17 +218,17 @@ void qa_ui_add_user_msg(const char *text)
     qa_msg_t msg = { .type = QA_MSG_USER };
     strncpy(msg.text, text, sizeof(msg.text) - 1);
     msg.text[sizeof(msg.text) - 1] = '\0';
-    xQueueSend(s_qa_queue, &msg, 0);
+    xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(50));
 }
 
 void qa_ui_add_assistant_msg(const char *text)
 {
     if (!s_qa_queue) return;
 
-    qa_msg_t msg = { .type = QA_MSG_ASSISTANT };
+    qa_msg_t msg = { .type = QA_MSG_ASSISTANT_APPEND };
     strncpy(msg.text, text, sizeof(msg.text) - 1);
     msg.text[sizeof(msg.text) - 1] = '\0';
-    xQueueSend(s_qa_queue, &msg, 0);
+    xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(50));
 }
 
 void qa_ui_add_log(const char *fmt, ...)
@@ -201,7 +240,7 @@ void qa_ui_add_log(const char *fmt, ...)
     va_start(args, fmt);
     vsnprintf(msg.text, sizeof(msg.text), fmt, args);
     va_end(args);
-    xQueueSend(s_qa_queue, &msg, 0);
+    xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(50));
 }
 
 void qa_ui_set_status(const char *text)
@@ -211,15 +250,63 @@ void qa_ui_set_status(const char *text)
     qa_msg_t msg = { .type = QA_MSG_STATUS };
     strncpy(msg.text, text, sizeof(msg.text) - 1);
     msg.text[sizeof(msg.text) - 1] = '\0';
-    xQueueSend(s_qa_queue, &msg, 0);
+    xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(50));
 }
 
 void qa_ui_clear_all(void)
 {
     if (!s_qa_queue) return;
 
+    s_last_assistant_label = NULL;
+    s_scroll_offset = 0;
+
     qa_msg_t msg = { .type = QA_MSG_CLEAR };
-    xQueueSend(s_qa_queue, &msg, 0);
+    xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(50));
+}
+
+void qa_ui_scroll(int direction)
+{
+    if (!s_qa_queue) return;
+
+    qa_msg_t msg = {
+        .type = QA_MSG_SCROLL,
+        .text[0] = (char)direction,
+        .text[1] = '\0',
+    };
+    xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(50));
+}
+
+esp_err_t qa_ui_save_audio(audio_save_req_t *req)
+{
+    if (!s_qa_queue || !req || !req->buf || req->count == 0 || !req->done) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Reject if a save is already in progress (audio task should wait) */
+    if (s_save_active) {
+        ESP_LOGW(TAG, "audio save already in progress, rejecting");
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_save_active = true;
+
+    s_save_req = req;
+
+    qa_msg_t msg = { .type = QA_MSG_AUDIO_SAVE };
+    if (xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(100)) != pdTRUE) {
+        s_save_req = NULL;
+        s_save_active = false;
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* Wait for the LVGL task to finish writing WAV + submitting to ASR */
+    if (xSemaphoreTake(req->done, pdMS_TO_TICKS(10000)) != pdTRUE) {
+        ESP_LOGW(TAG, "audio save timed out waiting for LVGL task");
+        s_save_req = NULL;
+        s_save_active = false;
+        return ESP_ERR_TIMEOUT;
+    }
+
+    return ESP_OK;
 }
 
 qa_degrade_level_t qa_degrade_get_level(void)
@@ -233,7 +320,20 @@ esp_err_t qa_degrade_step_up(void)
         return ESP_FAIL;
     }
     s_degrade++;
+
     ESP_LOGW(TAG, "Degradation stepped up to level %d", (int)s_degrade);
+
+    /* Send CLEAR message to LVGL task — never call lv_* APIs from outside */
+    if (s_qa_queue) {
+        if (s_degrade >= QA_DEGRADE_NO_ANIM) {
+            qa_msg_t msg = { .type = QA_MSG_CLEAR };
+            xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(50));
+        }
+        if (s_degrade >= QA_DEGRADE_MINIMAL) {
+            qa_ui_add_log("[SYS] 内存严重不足，建议重启");
+        }
+    }
+
     return ESP_OK;
 }
 
@@ -337,14 +437,14 @@ static void lvgl_create_ui(void)
     s_title_label = lv_label_create(s_top_bar);
     lv_label_set_text(s_title_label, "Q&A系统");
     lv_obj_set_style_text_color(s_title_label, lv_color_hex(COL_TITLE), 0);
-    lv_obj_set_style_text_font(s_title_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_title_label, qa_font_get(), 0);
     lv_obj_align(s_title_label, LV_ALIGN_LEFT_MID, 8, 0);
 
     /* Wi-Fi status */
     s_wifi_label = lv_label_create(s_top_bar);
     lv_label_set_text(s_wifi_label, "o 在线");
     lv_obj_set_style_text_color(s_wifi_label, lv_color_hex(COL_WIFI_ON), 0);
-    lv_obj_set_style_text_font(s_wifi_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_wifi_label, qa_font_get(), 0);
     lv_obj_align(s_wifi_label, LV_ALIGN_RIGHT_MID, -8, 0);
 
     /* ---------------------------------------------------------------
@@ -358,12 +458,13 @@ static void lvgl_create_ui(void)
     lv_obj_set_style_pad_all(s_chat_cont, 4, 0);
     lv_obj_set_style_radius(s_chat_cont, 0, 0);
     lv_obj_set_scrollbar_mode(s_chat_cont, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_flex_flow(s_chat_cont, LV_FLEX_FLOW_COLUMN);
 
     /* Placeholder shown before the first message */
     s_chat_placeholder = lv_label_create(s_chat_cont);
     lv_label_set_text(s_chat_placeholder, "开始对话后，消息将显示在这里");
     lv_obj_set_style_text_color(s_chat_placeholder, lv_color_hex(COL_LOG), 0);
-    lv_obj_set_style_text_font(s_chat_placeholder, &lv_font_xiaozhi_cn_16, 0);
+    lv_obj_set_style_text_font(s_chat_placeholder, qa_font_get(), 0);
     lv_obj_center(s_chat_placeholder);
 
     /* ---------------------------------------------------------------
@@ -377,10 +478,11 @@ static void lvgl_create_ui(void)
     lv_obj_set_style_pad_all(s_log_cont, 4, 0);
     lv_obj_set_style_radius(s_log_cont, 0, 0);
     lv_obj_set_scrollbar_mode(s_log_cont, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_flex_flow(s_log_cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_radius(s_log_cont, 0, 0);
+    lv_obj_set_scrollbar_mode(s_log_cont, LV_SCROLLBAR_MODE_OFF);
 
-    /* ---------------------------------------------------------------
-     *  Bottom bar (y=440, h=40)
-     * --------------------------------------------------------------- */
+    /* Bottom bar (y=440, h=40) — single centered status */
     s_bot_bar = lv_obj_create(scr);
     lv_obj_set_size(s_bot_bar, LCD_ST7796_H_RES, BOT_BAR_H);
     lv_obj_set_pos(s_bot_bar, 0, BOT_BAR_Y);
@@ -389,19 +491,12 @@ static void lvgl_create_ui(void)
     lv_obj_set_style_pad_all(s_bot_bar, 0, 0);
     lv_obj_set_style_radius(s_bot_bar, 0, 0);
 
-    /* Status text */
     s_status_label = lv_label_create(s_bot_bar);
-    lv_label_set_text(s_status_label, "o 待命中");
+    lv_label_set_text(s_status_label, "待命中 · 按住KEY3说话");
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(COL_STATUS), 0);
-    lv_obj_set_style_text_font(s_status_label, &lv_font_montserrat_14, 0);
-    lv_obj_align(s_status_label, LV_ALIGN_LEFT_MID, 8, 0);
-
-    /* Hint text */
-    s_hint_label = lv_label_create(s_bot_bar);
-    lv_label_set_text(s_hint_label, "按住KEY3说话");
-    lv_obj_set_style_text_color(s_hint_label, lv_color_hex(COL_STATUS), 0);
-    lv_obj_set_style_text_font(s_hint_label, &lv_font_montserrat_14, 0);
-    lv_obj_align(s_hint_label, LV_ALIGN_RIGHT_MID, -8, 0);
+    lv_obj_set_style_text_font(s_status_label, qa_font_get(), 0);
+    lv_obj_center(s_status_label);
+    s_hint_label = NULL; /* not used */
 }
 
 /* ================================================================
@@ -418,11 +513,13 @@ static void qa_ui_process_msg(const qa_msg_t *msg)
             lv_obj_del(s_chat_placeholder);
             s_chat_placeholder = NULL;
         }
+        s_last_assistant_label = NULL;
         {
             lv_obj_t *l = lv_label_create(s_chat_cont);
             lv_label_set_text(l, msg->text);
+            lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_text_color(l, lv_color_hex(COL_USER), 0);
-            lv_obj_set_style_text_font(l, &lv_font_xiaozhi_cn_16, 0);
+            lv_obj_set_style_text_font(l, qa_font_get(), 0);
             lv_obj_set_width(l, LCD_ST7796_H_RES - 8);
             lv_obj_scroll_to_y(s_chat_cont, LV_COORD_MAX, LV_ANIM_OFF);
         }
@@ -437,19 +534,56 @@ static void qa_ui_process_msg(const qa_msg_t *msg)
         {
             lv_obj_t *l = lv_label_create(s_chat_cont);
             lv_label_set_text(l, msg->text);
+            lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_text_color(l, lv_color_hex(COL_ASSISTANT), 0);
-            lv_obj_set_style_text_font(l, &lv_font_xiaozhi_cn_16, 0);
+            lv_obj_set_style_text_font(l, qa_font_get(), 0);
             lv_obj_set_width(l, LCD_ST7796_H_RES - 8);
+            s_last_assistant_label = l;
             lv_obj_scroll_to_y(s_chat_cont, LV_COORD_MAX, LV_ANIM_OFF);
         }
+        break;
+
+    case QA_MSG_ASSISTANT_APPEND:
+        /* Remove placeholder on first message */
+        if (s_chat_placeholder) {
+            lv_obj_del(s_chat_placeholder);
+            s_chat_placeholder = NULL;
+        }
+        if (s_last_assistant_label == NULL) {
+            /* First token: create label */
+            lv_obj_t *l = lv_label_create(s_chat_cont);
+            lv_label_set_text(l, msg->text);
+            lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+            lv_obj_set_style_text_color(l, lv_color_hex(COL_ASSISTANT), 0);
+            lv_obj_set_style_text_font(l, qa_font_get(), 0);
+            lv_obj_set_width(l, LCD_ST7796_H_RES - 8);
+            s_last_assistant_label = l;
+        } else {
+            /* Subsequent tokens: append to existing label */
+            const char *cur = lv_label_get_text(s_last_assistant_label);
+            size_t cur_len = strlen(cur);
+            size_t add_len = strlen(msg->text);
+            if (cur_len + add_len < 4096) {
+                char *buf = heap_caps_malloc(cur_len + add_len + 1,
+                                              MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                if (buf) {
+                    memcpy(buf, cur, cur_len);
+                    memcpy(buf + cur_len, msg->text, add_len + 1);
+                    lv_label_set_text(s_last_assistant_label, buf);
+                    heap_caps_free(buf);
+                }
+            }
+        }
+        lv_obj_scroll_to_y(s_chat_cont, LV_COORD_MAX, LV_ANIM_OFF);
         break;
 
     case QA_MSG_LOG:
         {
             lv_obj_t *l = lv_label_create(s_log_cont);
             lv_label_set_text(l, msg->text);
+            lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_text_color(l, lv_color_hex(COL_LOG), 0);
-            lv_obj_set_style_text_font(l, &lv_font_xiaozhi_cn_16, 0);
+            lv_obj_set_style_text_font(l, qa_font_get(), 0);
             lv_obj_set_width(l, LCD_ST7796_H_RES - 8);
             lv_obj_scroll_to_y(s_log_cont, LV_COORD_MAX, LV_ANIM_OFF);
         }
@@ -458,6 +592,13 @@ static void qa_ui_process_msg(const qa_msg_t *msg)
     case QA_MSG_STATUS:
         if (s_status_label) {
             lv_label_set_text(s_status_label, msg->text);
+        }
+        break;
+
+    case QA_MSG_AUDIO_SAVE:
+        if (s_save_req) {
+            do_audio_save(s_save_req);
+            s_save_req = NULL;
         }
         break;
 
@@ -472,7 +613,7 @@ static void qa_ui_process_msg(const qa_msg_t *msg)
         lv_obj_set_style_text_color(s_chat_placeholder,
                                     lv_color_hex(COL_LOG), 0);
         lv_obj_set_style_text_font(s_chat_placeholder,
-                                   &lv_font_xiaozhi_cn_16, 0);
+                                   qa_font_get(), 0);
         lv_obj_center(s_chat_placeholder);
 
         /* Reset status text */
@@ -480,7 +621,98 @@ static void qa_ui_process_msg(const qa_msg_t *msg)
             lv_label_set_text(s_status_label, "o 待命中");
         }
         break;
+
+    case QA_MSG_SCROLL: {
+        int dir = msg->text[0];
+        lv_coord_t cur = lv_obj_get_scroll_y(s_chat_cont);
+        lv_coord_t step = 40;  /* pixels per button press */
+        lv_obj_scroll_to_y(s_chat_cont, cur + dir * step, LV_ANIM_OFF);
+        break;
     }
+    }
+}
+
+/* ================================================================
+ *  Audio save helper (runs inside LVGL task — safe SPI access)
+ * ================================================================ */
+
+static void write_wav_header(FILE *f, uint32_t data_size)
+{
+    wav_header_t hdr = {
+        .riff            = { 'R', 'I', 'F', 'F' },
+        .file_size       = 36 + data_size,
+        .wave            = { 'W', 'A', 'V', 'E' },
+        .fmt             = { 'f', 'm', 't', ' ' },
+        .fmt_size        = 16,
+        .format          = 1,
+        .channels        = 1,
+        .sample_rate     = 16000,
+        .byte_rate       = 16000 * 1 * 16 / 8,
+        .block_align     = 1 * 16 / 8,
+        .bits_per_sample = 16,
+        .data            = { 'd', 'a', 't', 'a' },
+        .data_size       = data_size,
+    };
+    fwrite(&hdr, sizeof(hdr), 1, f);
+}
+
+static void do_audio_save(audio_save_req_t *req)
+{
+    ESP_LOGI(TAG, "Saving %zu PCM samples to %s", req->count, req->wav_path);
+
+    /* Write WAV to SD card for persistence (best-effort, not critical path) */
+    (void)mkdir("/sdcard/AUDIO", 0755);
+
+    FILE *f = fopen(req->wav_path, "wb");
+    if (f) {
+        uint32_t data_bytes = (uint32_t)req->count * sizeof(int16_t);
+        write_wav_header(f, data_bytes);
+        fwrite(req->buf, sizeof(int16_t), req->count, f);
+        fclose(f);
+        ESP_LOGI(TAG, "WAV saved: %s (%u bytes)",
+                 req->wav_path, data_bytes + sizeof(wav_header_t));
+    } else {
+        ESP_LOGW(TAG, "Failed to open %s (SD card busy?)", req->wav_path);
+    }
+
+    /* Build a complete WAV buffer (header + PCM) and submit to ASR in-memory */
+    uint32_t pcm_bytes = (uint32_t)req->count * sizeof(int16_t);
+    uint32_t wav_bytes = sizeof(wav_header_t) + pcm_bytes;
+
+    uint8_t *wav_buf = heap_caps_malloc(wav_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (wav_buf) {
+        wav_header_t hdr = {
+            .riff            = { 'R', 'I', 'F', 'F' },
+            .file_size       = 36 + pcm_bytes,
+            .wave            = { 'W', 'A', 'V', 'E' },
+            .fmt             = { 'f', 'm', 't', ' ' },
+            .fmt_size        = 16,
+            .format          = 1,
+            .channels        = 1,
+            .sample_rate     = 16000,
+            .byte_rate       = 16000 * 1 * 16 / 8,
+            .block_align     = 1 * 16 / 8,
+            .bits_per_sample = 16,
+            .data            = { 'd', 'a', 't', 'a' },
+            .data_size       = pcm_bytes,
+        };
+        memcpy(wav_buf, &hdr, sizeof(hdr));
+        memcpy(wav_buf + sizeof(hdr), req->buf, pcm_bytes);
+
+        esp_err_t err = volc_asr_submit_data(wav_buf, wav_bytes);
+        heap_caps_free(wav_buf);
+
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "volc_asr_submit_data: %s", esp_err_to_name(err));
+            qa_ui_add_log("[WARN] ASR提交失败");
+        }
+    } else {
+        ESP_DRAM_LOGE(TAG, "Failed to allocate WAV buffer (%u bytes)", wav_bytes);
+        qa_ui_add_log("[ERR] 内存不足");
+    }
+
+    s_save_active = false;
+    xSemaphoreGive(req->done);
 }
 
 /* ================================================================
@@ -540,11 +772,17 @@ static void lvgl_task_entry(void *arg)
     /* -------- Build the UI -------- */
     lvgl_create_ui();
 
+    /* -------- Subscribe to TWDT — SSE streaming may take >5s -------- */
+    esp_task_wdt_add(NULL);
+
     /* -------- Main loop: drain queue + service LVGL -------- */
     qa_msg_t msg;
     TickType_t last_wake = xTaskGetTickCount();
 
     while (1) {
+        /* Feed watchdog — SSE delta processing + LVGL rendering can exceed 5s */
+        esp_task_wdt_reset();
+
         /* Drain all messages currently in the queue */
         while (xQueueReceive(s_qa_queue, &msg, 0) == pdTRUE) {
             qa_ui_process_msg(&msg);

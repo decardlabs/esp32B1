@@ -1,7 +1,9 @@
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
+#include "bsp_audio.h"
 #include "bsp_i2c.h"
 #include "bsp_spi.h"
 #include "xl9555.h"
@@ -20,7 +22,6 @@
 #include "esp_heap_caps.h"
 
 static const char *TAG = "QA_MAIN";
-static qa_state_t s_state = QA_STATE_IDLE;
 
 /* Padding to prevent .bss overflow from corrupting log mutex */
 static uint8_t s_bss_pad[4096] __attribute__((unused));
@@ -90,6 +91,7 @@ void app_main(void) {
     bsp_spi2_lcd_init();
     ESP_ERROR_CHECK(lcd_st7796_init());
     ESP_ERROR_CHECK(es8388_init(24, 60));  // input_gain=24, output_vol=60
+    ESP_ERROR_CHECK(bsp_audio_init(BSP_AUDIO_SAMPLE_RATE));
     ws2812_init();
 
     ESP_LOGI(TAG, "BSP init OK");
@@ -98,6 +100,29 @@ void app_main(void) {
     // 3. Mount TF card and read config
     memset(&s_config, 0, sizeof(s_config));
     if (tf_sdcard_mount() == ESP_OK) {
+        // Check KEY4 at boot: rewrite config.ini with test LLM endpoint
+        bool key4_boot;
+        xl9555_get_pin_level(KEY_PORT, KEY4_PIN, &key4_boot);
+        if (key4_boot == 0) {
+            ESP_LOGI(TAG, "KEY4 pressed at boot — rewriting config.ini");
+            FILE *f = fopen("/sdcard/config.ini", "w");
+            if (f) {
+                fprintf(f,
+                    "WIFI_SSID=XL206-2\n"
+                    "WIFI_PASS=13510602814\n"
+                    "ASR_API_KEY=423199ee-f156-411b-84d6-ff2469c54a34\n"
+                    "ASR_RESOURCE_ID=volc.seedasr.auc\n"
+                    "LLM_API_KEY=sk-XaugTmX1euOEE6hM019eA650997d75899dBeA7874aA21429\n"
+                    "LLM_ENDPOINT=https://api.decard.cc/v1/chat/completions\n"
+                    "LLM_MODEL=deepseek-v4-flash\n");
+                fclose(f);
+                ESP_LOGI(TAG, "config.ini rewritten, rebooting...");
+                qa_ui_add_log("[SYS] 配置已更新，重启中");
+                vTaskDelay(pdMS_TO_TICKS(500));
+                esp_restart();
+            }
+        }
+
         ESP_LOGI(TAG, "TF card mounted, reading config.ini");
         if (config_parse("/sdcard/config.ini", &s_config) == ESP_OK) {
             log_mem_snapshot("config_loaded");
@@ -139,14 +164,38 @@ void app_main(void) {
     log_stack_watermarks();
     log_mem_snapshot("stack_check");
 
+    bool key4_was_pressed = false;
+    TickType_t key4_press_tick = 0;
+
     while (1) {
-        // KEY4 — clear dialog
+        // KEY1 — scroll UP
+        bool key1_level;
+        xl9555_get_pin_level(KEY_PORT, KEY1_PIN, &key1_level);
+        if (key1_level == 0) {
+            qa_ui_scroll(-1);
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+
+        // KEY4 — short press: scroll DOWN; long press (>1.5s): clear dialog
         bool key4_level;
         xl9555_get_pin_level(KEY_PORT, KEY4_PIN, &key4_level);
-        if (key4_level == 0) {
-            qa_ui_clear_all();
-            qa_ui_add_log("[CLR] 对话已清除");
-            vTaskDelay(pdMS_TO_TICKS(300));
+        if (key4_level == 0 && !key4_was_pressed) {
+            key4_was_pressed = true;
+            key4_press_tick = xTaskGetTickCount();
+        } else if (key4_level != 0 && key4_was_pressed) {
+            // Released: if less than 1.5s, scroll down
+            if ((xTaskGetTickCount() - key4_press_tick) < pdMS_TO_TICKS(1500)) {
+                qa_ui_scroll(1);
+            }
+            key4_was_pressed = false;
+        } else if (key4_level == 0 && key4_was_pressed) {
+            // Still pressed: check for long press
+            if ((xTaskGetTickCount() - key4_press_tick) >= pdMS_TO_TICKS(1500)) {
+                qa_ui_clear_all();
+                qa_ui_add_log("[CLR] 对话已清除");
+                key4_was_pressed = false;  // prevent repeat
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
         }
 
         // Periodic Wi-Fi status update

@@ -12,6 +12,9 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
+#include <math.h>
+#include <sys/stat.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -38,177 +41,20 @@ static const char *TAG = "AUDIO_CAPTURE";
 /* Debounce delay after recording stops before re-scanning the key */
 #define DEBOUNCE_MS         250
 
-/* ------------------------------------------------------------------ */
-/*  WAV header (RIFF / PCM)                                           */
-/* ------------------------------------------------------------------ */
-
-typedef struct __attribute__((packed)) {
-    char     riff[4];        /* "RIFF"                                    */
-    uint32_t file_size;      /* total file size - 8 (i.e. 36 + data_size) */
-    char     wave[4];        /* "WAVE"                                    */
-    char     fmt[4];         /* "fmt "                                    */
-    uint32_t fmt_size;       /* size of the fmt chunk (16 for PCM)        */
-    uint16_t format;         /* 1 = PCM                                   */
-    uint16_t channels;       /* 1 = mono                                  */
-    uint32_t sample_rate;    /* 16000                                     */
-    uint32_t byte_rate;      /* sample_rate * channels * bits_per_sample/8 */
-    uint16_t block_align;    /* channels * bits_per_sample/8              */
-    uint16_t bits_per_sample;/* 16                                        */
-    char     data[4];        /* "data"                                    */
-    uint32_t data_size;      /* bytes of PCM data                         */
-} wav_header_t;
+/*
+ * WAV header struct and write_wav_header() are in task_qa_lvgl.c
+ * where all WAV file I/O happens (PSRAM-buffer refactor).
+ */
 
 /* ------------------------------------------------------------------ */
 /*  Static state                                                      */
 /* ------------------------------------------------------------------ */
 
 static audio_capture_state_t s_state = AUDIO_IDLE;
-static char s_last_file[64] = { 0 };
-
-/* ------------------------------------------------------------------ */
-/*  Public state accessors                                            */
-/* ------------------------------------------------------------------ */
 
 audio_capture_state_t audio_capture_get_state(void)
 {
     return s_state;
-}
-
-const char *audio_capture_get_last_file(void)
-{
-    return s_last_file[0] ? s_last_file : NULL;
-}
-
-/* ------------------------------------------------------------------ */
-/*  WAV helpers                                                       */
-/* ------------------------------------------------------------------ */
-
-/** Write a complete WAV header at the current file position. */
-static void write_wav_header(FILE *f, uint32_t data_size)
-{
-    wav_header_t hdr = {
-        .riff            = { 'R', 'I', 'F', 'F' },
-        .file_size       = 36 + data_size,
-        .wave            = { 'W', 'A', 'V', 'E' },
-        .fmt             = { 'f', 'm', 't', ' ' },
-        .fmt_size        = 16,
-        .format          = 1,
-        .channels        = 1,
-        .sample_rate     = 16000,
-        .byte_rate       = 16000 * 1 * 16 / 8,   /* 32000 */
-        .block_align     = 1 * 16 / 8,            /* 2     */
-        .bits_per_sample = 16,
-        .data            = { 'd', 'a', 't', 'a' },
-        .data_size       = data_size,
-    };
-    fwrite(&hdr, sizeof(hdr), 1, f);
-}
-
-/** Generate a timestamp-based WAV filename into `buf` (size at least 48). */
-static void make_filename(char *buf, size_t buf_size)
-{
-    time_t now = time(NULL);
-    struct tm tm_info;
-
-    /* localtime_r is thread-safe; on failure fall back to a counter-based name */
-    if (localtime_r(&now, &tm_info) == NULL) {
-        /* If the RTC has not been set, localtime may fail.  Use epoch time as
-         * a numeric suffix so the name is still (probably) unique. */
-        snprintf(buf, buf_size, "/sdcard/AUDIO/%u.wav", (unsigned)now);
-        return;
-    }
-
-    strftime(buf, buf_size, "/sdcard/AUDIO/%Y%m%d_%H%M%S.wav", &tm_info);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Audio capture logic                                               */
-/* ------------------------------------------------------------------ */
-
-/**
- * Run the recording sub-loop:
- *  - Read I2S data
- *  - Convert 24 kHz stereo to 16 kHz mono
- *  - Write to WAV file
- *  - Stop when KEY3 is released or timeout expires
- *
- * \param[in]  f          Open FILE pointer (writable, positioned after header)
- * \param[in]  timeout_s  Maximum recording duration in seconds
- * \return total number of PCM data bytes written (excluding the 44-byte header)
- */
-static uint32_t record_loop(FILE *f, int timeout_s)
-{
-    /*
-     * I2S delivers 24 kHz stereo interleaved (L,R,L,R,...).
-     * We convert to 16 kHz mono in two steps:
-     *   1. Stereo -> mono: average left and right channels.
-     *   2. Downsample 24 kHz -> 16 kHz: keep 2 out of every 3 samples.
-     */
-    int16_t i2s_buf[I2S_BUF_SAMPLES];
-    int16_t mono_buf[MONO_BUF_MAX];
-
-    uint32_t data_bytes = 0;
-    int64_t start_us = esp_timer_get_time();
-    bool stop = false;
-
-    while (!stop) {
-        size_t samples_read = 0;   /* number of int16_t values returned */
-
-        esp_err_t ret = bsp_audio_read(i2s_buf, I2S_BUF_SAMPLES,
-                                       &samples_read, portMAX_DELAY);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "I2S read failed: %s", esp_err_to_name(ret));
-            break;
-        }
-
-        /*
-         * Convert valid stereo frames to mono, applying 24k->16k decimation.
-         *
-         * samples_read is the number of int16_t values returned.  Normally it
-         * equals I2S_BUF_SAMPLES, but we guard against partial reads.
-         */
-        int stereo_frames = (int)samples_read / 2;   /* each frame = L+R   */
-        int mono_count = 0;
-
-        for (int i = 0; i < stereo_frames; i++) {
-            /*
-             * Downsample: 24 000 -> 16 000  (ratio 2:3).
-             * Discard the third sample of every triplet.
-             */
-            if (i % 3 != 2) {
-                int32_t left  = i2s_buf[i * 2];
-                int32_t right = i2s_buf[i * 2 + 1];
-                mono_buf[mono_count++] = (int16_t)((left + right) / 2);
-            }
-        }
-
-        if (mono_count > 0) {
-            size_t written = fwrite(mono_buf, sizeof(int16_t), mono_count, f);
-            if (written != (size_t)mono_count) {
-                ESP_LOGE(TAG, "File write failed (disk full?) -- stopping");
-                break;
-            }
-            data_bytes += (uint32_t)(written * sizeof(int16_t));
-        }
-
-        /* --- Check stop conditions --- */
-
-        /* KEY3 released (active low; readback == 1 means released) */
-        bool key_level;
-        xl9555_get_pin_level(KEY_PORT, KEY3_PIN, &key_level);
-        if (key_level != 0) {
-            stop = true;
-        }
-
-        /* Timeout */
-        int64_t elapsed_us = esp_timer_get_time() - start_us;
-        if (elapsed_us >= (int64_t)timeout_s * 1000000LL) {
-            ESP_LOGI(TAG, "Recording timeout (%d s)", timeout_s);
-            stop = true;
-        }
-    }
-
-    return data_bytes;
 }
 
 /* ------------------------------------------------------------------ */
@@ -219,11 +65,12 @@ static void audio_capture_task(void *pv_params)
 {
     const config_t *cfg = (const config_t *)pv_params;
     int timeout_s = config_get_int(cfg, "AUDIO_TIMEOUT_S", 30);
+    bool key3_was_pressed = false;
 
     ESP_LOGI(TAG, "Audio capture task started (timeout=%ds)", timeout_s);
 
-    /* Ensure the target directory exists -- harmless if it already does. */
-    mkdir("/sdcard/AUDIO", 0755);
+    /* Ensure the target directory exists -- retry on each recording */
+    (void)mkdir("/sdcard/AUDIO", 0755);
 
     while (1) {
         bool key_level;
@@ -237,8 +84,14 @@ static void audio_capture_task(void *pv_params)
 
         xl9555_get_pin_level(KEY_PORT, KEY3_PIN, &key_level);
         if (key_level != 0) {
+            key3_was_pressed = false;
             continue;   /* not pressed (active low) */
         }
+
+        if (key3_was_pressed) {
+            continue;   /* wait for a fresh press edge */
+        }
+        key3_was_pressed = true;
 
         /* ============================================================== */
         /*  KEY3 pressed: start recording                                 */
@@ -247,46 +100,112 @@ static void audio_capture_task(void *pv_params)
         qa_ui_set_status("录音中...");
         qa_ui_add_log("[MIC] 开始录音");
 
-        /* Generate a unique filename */
-        char filepath[64];
-        make_filename(filepath, sizeof(filepath));
-        strncpy(s_last_file, filepath, sizeof(s_last_file) - 1);
-        s_last_file[sizeof(s_last_file) - 1] = '\0';
+        /* Capture audio to PSRAM buffer, converting 24kHz stereo → 16kHz mono on-the-fly */
+        #define CAPTURE_BUF_SAMPLES  80000  /* ~5 seconds of 16kHz mono output */
+        int16_t *audio_buf = heap_caps_malloc(CAPTURE_BUF_SAMPLES * sizeof(int16_t),
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (audio_buf) {
+            size_t mono_count = 0;
+            int empty_reads = 0;
+            int64_t capture_start_us = esp_timer_get_time();
 
-        ESP_LOGI(TAG, "Recording to %s", filepath);
+            while ((esp_timer_get_time() - capture_start_us) < ((int64_t)timeout_s * 1000000LL)) {
+                /* Check KEY3 release (need ~1s minimum audio) */
+                xl9555_get_pin_level(KEY_PORT, KEY3_PIN, &key_level);
+                if (key_level != 0 && mono_count > 16000) break;
 
-        FILE *f = fopen(filepath, "wb");
-        if (f == NULL) {
-            ESP_LOGE(TAG, "Cannot open %s for writing", filepath);
-            qa_ui_add_log("[MIC] 创建文件失败");
-            qa_ui_set_status("按住KEY3说话");
-            s_state = AUDIO_IDLE;
-            vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
-            continue;
-        }
+                /* Read I2S data (24kHz stereo interleaved L,R,L,R...) */
+                static int16_t raw[1024];
+                size_t raw_samples = 0;
+                esp_err_t ret = bsp_audio_read(raw, 1024, &raw_samples, 100);
+                if (ret != ESP_OK) {
+                    ESP_LOGE(TAG, "Audio read failed: %s", esp_err_to_name(ret));
+                    break;
+                }
 
-        /* Write placeholder header (data_size = 0) */
-        write_wav_header(f, 0);
+                if (raw_samples == 0) {
+                    empty_reads++;
+                    if (empty_reads >= 5) {
+                        ESP_LOGW(TAG, "Audio read returned 0 repeatedly");
+                        break;
+                    }
+                    continue;
+                }
+                empty_reads = 0;
 
-        /* Record until KEY3 release / timeout */
-        uint32_t data_size = record_loop(f, timeout_s);
+                /* Convert 24kHz stereo → 16kHz mono:
+                 *   1. Average L+R channels
+                 *   2. Downsample 3:2 (discard every 3rd frame) */
+                int frames = (int)raw_samples / 2;
+                for (int i = 0; i < frames && mono_count < CAPTURE_BUF_SAMPLES; i++) {
+                    if (i % 3 != 2) {   /* keep 2 of every 3 frames */
+                        int32_t left  = raw[i * 2];
+                        int32_t right = raw[i * 2 + 1];
+                        audio_buf[mono_count++] = (int16_t)((left + right) / 2);
+                    }
+                }
+            }
 
-        /* Finalise the WAV header with the actual data size */
-        if (fseek(f, 0, SEEK_SET) == 0) {
-            write_wav_header(f, data_size);
+            float dur = (float)mono_count / 16000.0f;
+            ESP_LOGI(TAG, "Captured %.1fs (%zu mono samples)", dur, mono_count);
+            qa_ui_add_log("[MIC] 录音完成 (%.1fs)", (double)dur);
+
+            /* Check audio energy — warn if likely silence */
+            {
+                int64_t sum_sq = 0;
+                int peak = 0;
+                for (size_t i = 0; i < mono_count; i++) {
+                    int32_t s = audio_buf[i];
+                    sum_sq += (int64_t)s * s;
+                    int abs_s = (s < 0) ? -s : s;
+                    if (abs_s > peak) peak = abs_s;
+                }
+                int64_t rms = (mono_count > 0) ? (int64_t)sqrtf((float)(sum_sq / mono_count)) : 0;
+                ESP_LOGI(TAG, "Audio energy: RMS=%lld peak=%d", (long long)rms, peak);
+                if (rms < 20) {
+                    ESP_LOGW(TAG, "Audio appears SILENT (RMS=%lld, peak=%d)", (long long)rms, peak);
+                    qa_ui_add_log("[WARN] 音频能量过低，请靠近MIC说话");
+                }
+            }
+
+            /* Delegate WAV save + ASR submit to LVGL task (safe SPI access) */
+            if (mono_count > 0) {
+                static unsigned int s_counter = 0;
+                if (s_counter == 0) {
+                    time_t now = time(NULL);
+                    s_counter = (unsigned int)now;
+                    if (s_counter == 0) s_counter = 1;
+                }
+                char wav_path[64];
+                snprintf(wav_path, sizeof(wav_path), "/sdcard/AUDIO/%08u.wav", s_counter++);
+
+                SemaphoreHandle_t save_done = xSemaphoreCreateBinary();
+                if (save_done) {
+                    audio_save_req_t req = {
+                        .buf      = audio_buf,
+                        .count    = mono_count,
+                        .done     = save_done,
+                    };
+                    memcpy(req.wav_path, wav_path, sizeof(req.wav_path));
+
+                    esp_err_t err = qa_ui_save_audio(&req);
+                    if (err != ESP_OK) {
+                        ESP_LOGE(TAG, "qa_ui_save_audio failed: %s", esp_err_to_name(err));
+                        qa_ui_add_log("[ERR] 保存/识别失败");
+                    }
+                    vSemaphoreDelete(save_done);
+                } else {
+                    ESP_LOGE(TAG, "Failed to create save semaphore");
+                }
+            }
+
+            heap_caps_free(audio_buf);
         } else {
-            ESP_LOGW(TAG, "fseek failed -- WAV header may be incomplete");
+            ESP_DRAM_LOGE(TAG, "Failed to allocate audio buffer");
+            qa_ui_add_log("[ERR] 内存不足");
         }
 
-        fclose(f);
-
-        /* Report completion */
-        int total_sec = (data_size / 2) / 16000;   /* rough, ok for UI */
-        ESP_LOGI(TAG, "Recording saved: %s (%u PCM bytes, ~%d s)",
-                 filepath, data_size, total_sec);
-        qa_ui_add_log("[MIC] 录音完成 (%ds)", total_sec);
-        qa_ui_set_status("按住KEY3说话");
-
+        qa_ui_set_status("待命中 · 按住KEY3说话");
         s_state = AUDIO_IDLE;
 
         /* Debounce before accepting the next press */
@@ -300,6 +219,6 @@ static void audio_capture_task(void *pv_params)
 
 BaseType_t audio_capture_task_create(const config_t *cfg)
 {
-    return xTaskCreate(audio_capture_task, "audio_capture", 4096,
+    return xTaskCreate(audio_capture_task, "audio_capture", 8192,
                        (void *)cfg, 5, NULL);
 }

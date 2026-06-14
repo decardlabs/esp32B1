@@ -41,7 +41,7 @@ typedef struct {
     int comet_dir;
 } ws2812_runtime_t;
 
-#define WS2812_TASK_STACK          4096
+#define WS2812_TASK_STACK          6144
 #define WS2812_TASK_PRIO           10
 #define WS2812_QUEUE_LEN           8
 #define WS2812_FRAME_MS            20
