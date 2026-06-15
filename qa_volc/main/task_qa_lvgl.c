@@ -211,6 +211,37 @@ BaseType_t lcd_lvgl_task_create(void)
     return ret;
 }
 
+/* Strip control characters (except \t, \n, \r) from text in-place.
+ * Prevents garbage/boxes from appearing in LVGL labels. */
+static void strip_control_chars(char *buf, size_t cap)
+{
+    char *src = buf;
+    char *dst = buf;
+    while (*src && (size_t)(dst - buf) < cap - 1) {
+        unsigned char c = (unsigned char)*src;
+        if (c >= 0x20 && c != 0x7F) {
+            *dst++ = *src++;           /* printable ASCII */
+        } else if (c == '\t' || c == '\n' || c == '\r') {
+            *dst++ = *src++;           /* keep whitespace */
+        } else if (c >= 0x80) {
+            /* Copy valid UTF-8 multi-byte sequence */
+            int follow;
+            if      ((c & 0xE0) == 0xC0) follow = 1;
+            else if ((c & 0xF0) == 0xE0) follow = 2;
+            else if ((c & 0xF8) == 0xF0) follow = 3;
+            else { src++; continue; }     /* invalid lead byte */
+            *dst++ = *src++;
+            while (follow-- > 0 && *src && (size_t)(dst - buf) < cap - 1) {
+                if (((unsigned char)*src & 0xC0) != 0x80) break;
+                *dst++ = *src++;
+            }
+        } else {
+            src++;                       /* skip control char */
+        }
+    }
+    *dst = '\0';
+}
+
 void qa_ui_add_user_msg(const char *text)
 {
     if (!s_qa_queue) return;
@@ -218,6 +249,7 @@ void qa_ui_add_user_msg(const char *text)
     qa_msg_t msg = { .type = QA_MSG_USER };
     strncpy(msg.text, text, sizeof(msg.text) - 1);
     msg.text[sizeof(msg.text) - 1] = '\0';
+    strip_control_chars(msg.text, sizeof(msg.text));
     xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(50));
 }
 
@@ -228,6 +260,7 @@ void qa_ui_add_assistant_msg(const char *text)
     qa_msg_t msg = { .type = QA_MSG_ASSISTANT_APPEND };
     strncpy(msg.text, text, sizeof(msg.text) - 1);
     msg.text[sizeof(msg.text) - 1] = '\0';
+    strip_control_chars(msg.text, sizeof(msg.text));
     xQueueSend(s_qa_queue, &msg, pdMS_TO_TICKS(50));
 }
 

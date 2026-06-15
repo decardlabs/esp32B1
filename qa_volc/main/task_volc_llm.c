@@ -24,6 +24,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_crt_bundle.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -338,6 +339,7 @@ static void process_question(const char *question,
         .buffer_size    = LLM_READ_BUF_SIZE,
         .buffer_size_tx = LLM_READ_BUF_SIZE,
         .skip_cert_common_name_check = true,
+        .crt_bundle_attach = esp_crt_bundle_attach,
         .keep_alive_enable = false,
         .event_handler  = llm_http_event_handler,
         .user_data      = (void *)&sse_ctx,
@@ -398,6 +400,15 @@ static void process_question(const char *question,
         ESP_LOGI(TAG, "LLM answer complete (%zu bytes)", sse_ctx.len);
         qa_ui_add_log("[OK] 回答完成");
         qa_ui_set_status("回答完成");
+
+        /* Free LLM TLS resources before triggering TTS (needs ~16KB TLS ctx) */
+        if (client) {
+            esp_http_client_cleanup(client);
+            client = NULL;
+        }
+
+        /* Wait for heap to coalesce after TLS context free */
+        vTaskDelay(pdMS_TO_TICKS(2000));
 
         /* Trigger TTS playback */
         if (sse_ctx.len > 0) {

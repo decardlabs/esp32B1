@@ -98,7 +98,7 @@ void app_main(void) {
     // board_camera_gpio_init();  // Camera not needed for MVP
     bsp_spi2_lcd_init();
     ESP_ERROR_CHECK(lcd_st7796_init());
-    ESP_ERROR_CHECK(es8388_init(24, 60));  // input_gain=24, output_vol=60
+    ESP_ERROR_CHECK(es8388_init(24, 85));  // input_gain=24, output_vol=85
     ESP_ERROR_CHECK(bsp_audio_init(BSP_AUDIO_SAMPLE_RATE));
     ws2812_init();
 

@@ -20,6 +20,17 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 # ark.cn-beijing.volces.com requires TLS 1.3 + TLS_AES_256_GCM_SHA384
 CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
 
+# Allocate mbedTLS large structures (handshake params ~16KB) from PSRAM.
+# ESP32-S3 has 8MB PSRAM — TLS structures fit easily and PSRAM is cacheable.
+# Fixes "alloc(16717 bytes) failed" on repeated HTTPS calls due to internal RAM fragmentation.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# Reduce internal RAM pressure from mbedTLS features we don't need
+# (all three tasks are HTTPS clients, no server, no renegotiation)
+# CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE is not set
+# CONFIG_MBEDTLS_SERVER_SSL_SESSION_TICKETS is not set
+# CONFIG_MBEDTLS_SSL_RENEGOTIATION is not set
+
 # Dev debug: mbedtls TLS handshake logging (remove for production)
 CONFIG_MBEDTLS_DEBUG=y
 CONFIG_MBEDTLS_DEBUG_LEVEL_WARN=y

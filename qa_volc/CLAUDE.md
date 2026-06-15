@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+Project version: v0.7.0
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Golden Rules
@@ -54,7 +56,7 @@ The Python venv needs `requests` installed (`pip install requests`).
 | `qa_lvgl_task` | 8192 | 5 | 1 | LVGL UI + SPI SD card I/O + audio save bridge |
 | `volc_asr` | 8192 | 5 | any | Volcengine Flash ASR: base64→HTTP→parse result |
 | `volc_llm` | 16384 | 5 | any | LLM Chat Completions: SSE streaming |
-| `volc_tts` | 16384 | 5 | any | TTS: HTTP SSE → base64 decode → I2S playback |
+| `volc_tts` | 16384 | 5 | any | TTS: HTTP → accumulate body → extract all `"data":"` base64 fragments → decode → I2S playback (PCM buf 3MB ~65s) |
 | `audio_capture` | 8192 | 5 | any | KEY3 triggered I2S capture + real-time 24k→16k conversion |
 | `ws2812_task` | 6144 | 10 | any | WS2812 LED strip control |
 
@@ -76,7 +78,10 @@ KEY3 press
 - **Audio conversion**: I2S delivers 24kHz stereo interleaved data. The capture loop converts to 16kHz mono on-the-fly: average L+R channels, then downsample 3:2.
 - **Large buffer handling**: cJSON can't handle 85KB+ base64 strings. The ASR JSON request body is built with snprintf directly, not cJSON.
 - **LLM API**: Uses Chat Completions format (`messages` array) via `/api/v3/chat/completions` (auto-converted from `/api/v3/responses` in config). SSE parsing handles both Chat Completions (`choices[0].delta.content`) and Responses API (`response.output_text.delta`) formats.
-- **PSRAM for large allocations**: All audio buffers (>64KB) use `heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`.
+- **TTS SSE accumulation**: The TTS API returns raw JSON objects (not SSE `data:` prefix). The response body is accumulated in PSRAM, then all `"data":"..."` base64 fragments are decoded with a `while` loop (same approach as reader_v2). Fixes the previous 0.4s audio truncation.
+- **Text sanitization**: LLM response text is sanitized via `strip_control_chars()` before display, removing control characters and invalid UTF-8 sequences to prevent garbage boxes in LVGL labels.
+- **PSRAM for large allocations**: All audio buffers (>64KB) use `heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`. TTS PCM buffer is 3MB (~65s of 24000Hz mono audio).
+- **TLS stability**: `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` moves TLS handshake structures (~16KB) to PSRAM, preventing internal RAM fragmentation from causing `alloc(16717 bytes) failed` on repeated HTTPS calls.
 
 ### Key Mappings
 
@@ -105,8 +110,9 @@ The endpoint `ark.cn-beijing.volces.com` requires TLS 1.3 with `TLS_AES_256_GCM_
 - `CONFIG_LV_FONT_FMT_TXT_LARGE=y` — Chinese font support
 - `CONFIG_ESP_TLS_INSECURE=y`, `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` — skip cert verify (dev)
 - `CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y` — required for Ark endpoint
+- `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` — TLS handshake structs in PSRAM to avoid internal RAM fragmentation
 
-Note: `idf.py reconfigure` doesn't reliably pick up new defaults. Changes to `sdkconfig.defaults` may require `rm -f sdkconfig` before `idf.py reconfigure`, or write the config directly to `sdkconfig`.
+Note: `idf.py reconfigure` doesn't reliably pick up new defaults. Changes to `sdkconfig.defaults` require `rm -f sdkconfig` before `idf.py reconfigure`.
 
 ### Hardware Pin Mapping
 

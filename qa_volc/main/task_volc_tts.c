@@ -26,6 +26,7 @@
 #include "mbedtls/base64.h"
 #include "bsp_audio.h"
 #include "es8388.h"
+#include "esp_crt_bundle.h"
 #include "task_qa_lvgl.h"
 
 /* ------------------------------------------------------------------ */
@@ -46,8 +47,8 @@ static const char *TAG = "VOLC_TTS";
 #define TTS_HTTP_TIMEOUT_MS       30000
 #define TTS_READ_BUF_SIZE         2048
 
-/* Max PCM buffer for one TTS response (24000Hz mono 16-bit, ~10s = 480KB) */
-#define TTS_PCM_BUF_SIZE          (480 * 1024)
+/* Max PCM buffer for one TTS response (24000Hz mono 16-bit, ~65s = 3.0MB) */
+#define TTS_PCM_BUF_SIZE          (3 * 1024 * 1024)
 
 /* ------------------------------------------------------------------ */
 /*  Message queue                                                     */
@@ -84,8 +85,110 @@ static void generate_uuid(char *buf, size_t buf_size)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Mono→Stereo conversion (in-place, right channel = left)           */
+/*  HTTP response context                                            */
 /* ------------------------------------------------------------------ */
+
+typedef struct {
+    uint8_t *pcm_buf;
+    size_t  pcm_cap;
+    size_t  pcm_len;
+    char   *resp_buf;     /* raw response body (accumulated) */
+    size_t  resp_len;
+    size_t  resp_cap;
+    bool    error;
+} tts_http_ctx_t;
+
+/* ------------------------------------------------------------------ */
+/*  Extract all base64 audio fragments from the response body and
+ *  decode them directly into the PCM accumulation buffer.
+ *  Searches for every "data":"..." pattern (like reader_v2 does).      */
+/* ------------------------------------------------------------------ */
+
+static void process_audio_payload(tts_http_ctx_t *ctx)
+{
+    const char *cursor = ctx->resp_buf;
+    size_t fragments = 0;
+
+    if (cursor == NULL || *cursor == '\0') return;
+
+    while (cursor && *cursor) {
+        const char *b64_start = strstr(cursor, "\"data\":\"");
+        if (!b64_start) break;
+        b64_start += 8;  /* skip past "data":" */
+
+        const char *b64_end = strchr(b64_start, '"');
+        if (!b64_end || b64_end <= b64_start) break;
+
+        size_t src_len = (size_t)(b64_end - b64_start);
+        if (src_len == 0) { cursor = b64_end + 1; continue; }
+
+        /* Query decoded size */
+        size_t dst_len = 0;
+        if (mbedtls_base64_decode(NULL, 0, &dst_len,
+                (const uint8_t *)b64_start, src_len) != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL) {
+            break;
+        }
+
+        if (ctx->pcm_len + dst_len > ctx->pcm_cap) {
+            ESP_LOGW(TAG, "PCM buffer full (%zu + %zu > %zu)",
+                     ctx->pcm_len, dst_len, ctx->pcm_cap);
+            break;
+        }
+
+        /* Decode base64 directly into PCM buffer */
+        mbedtls_base64_decode(ctx->pcm_buf + ctx->pcm_len, dst_len, &dst_len,
+            (const uint8_t *)b64_start, src_len);
+        ctx->pcm_len += dst_len;
+        fragments++;
+
+        cursor = b64_end + 1;  /* continue searching for more fragments */
+    }
+
+    ESP_LOGI(TAG, "audio fragments=%d total_pcm=%zu bytes (%.1fs)",
+             fragments, ctx->pcm_len,
+             (float)(ctx->pcm_len / 2) / 24000.0f);
+}
+
+/* ------------------------------------------------------------------ */
+/*  HTTP event handler — accumulates full response body               */
+/* ------------------------------------------------------------------ */
+
+static esp_err_t tts_http_event_handler(esp_http_client_event_t *evt)
+{
+    tts_http_ctx_t *ctx = (tts_http_ctx_t *)evt->user_data;
+    if (ctx == NULL) return ESP_OK;
+
+    switch (evt->event_id) {
+
+    case HTTP_EVENT_ON_DATA:
+        if (evt->data == NULL || evt->data_len == 0) break;
+        /* Accumulate response body (may span multiple ON_DATA events) */
+        if (ctx->resp_len + evt->data_len + 1 > ctx->resp_cap) {
+            size_t new_cap = ctx->resp_cap ? ctx->resp_cap : 4096;
+            while (new_cap < ctx->resp_len + evt->data_len + 1) new_cap *= 2;
+            char *newbuf = heap_caps_realloc(ctx->resp_buf, new_cap,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!newbuf) {
+                ctx->error = true;
+                break;
+            }
+            ctx->resp_buf = newbuf;
+            ctx->resp_cap = new_cap;
+        }
+        memcpy(ctx->resp_buf + ctx->resp_len, evt->data, evt->data_len);
+        ctx->resp_len += evt->data_len;
+        break;
+
+    case HTTP_EVENT_ERROR:
+        ctx->error = true;
+        break;
+
+    default:
+        break;
+    }
+
+    return ESP_OK;
+}
 
 static size_t mono_to_stereo(int16_t *stereo, const int16_t *mono, size_t mono_samples)
 {
@@ -172,8 +275,18 @@ static void play_tts(const char *text,
     ESP_LOGI(TAG, "TTS request: %zu bytes", strlen(json_str));
 
     /* ------------------------------------------------------------------ */
-    /*  2. HTTP request with SSE streaming                                */
+    /*  2. HTTP request — accumulate full JSON response body              */
     /* ------------------------------------------------------------------ */
+
+    tts_http_ctx_t http_ctx = {
+        .pcm_buf    = pcm_buf,
+        .pcm_cap    = TTS_PCM_BUF_SIZE,
+        .pcm_len    = 0,
+        .resp_buf   = NULL,
+        .resp_len   = 0,
+        .resp_cap   = 0,
+        .error      = false,
+    };
 
     esp_http_client_config_t http_cfg = {
         .url            = TTS_API_URL,
@@ -181,6 +294,9 @@ static void play_tts(const char *text,
         .timeout_ms     = TTS_HTTP_TIMEOUT_MS,
         .buffer_size    = TTS_READ_BUF_SIZE,
         .skip_cert_common_name_check = true,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .event_handler  = tts_http_event_handler,
+        .user_data      = (void *)&http_ctx,
     };
 
     client = esp_http_client_init(&http_cfg);
@@ -190,6 +306,7 @@ static void play_tts(const char *text,
     }
 
     esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_header(client, "Accept", "text/event-stream, application/json");
     esp_http_client_set_header(client, "X-Api-Key", api_key);
     esp_http_client_set_header(client, "X-Api-Resource-Id", resource_id);
     esp_http_client_set_post_field(client, json_str, strlen(json_str));
@@ -199,89 +316,38 @@ static void play_tts(const char *text,
 
     err = esp_http_client_perform(client);
 
-    /* ------------------------------------------------------------------ */
-    /*  3. Parse SSE response: extract base64 data chunks                 */
-    /* ------------------------------------------------------------------ */
+    /* Process accumulated response body — extract all base64 audio fragments */
+    if (err == ESP_OK && http_ctx.resp_buf && http_ctx.resp_len > 0) {
+        http_ctx.resp_buf[http_ctx.resp_len] = '\0';
+        process_audio_payload(&http_ctx);
+        pcm_len = http_ctx.pcm_len;
+    }
 
     if (err == ESP_OK) {
         long status = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "HTTP %ld", status);
-
-        if (status == 200) {
-            /* Read SSE response body */
-            static char buf[TTS_READ_BUF_SIZE];
-            int len;
-            bool sse_done = false;
-
-            /* SSE line buffer (static to avoid stack overflow) */
-            static char sse_line[2048];
-            int sse_len = 0;
-
-            while ((len = esp_http_client_read(client, buf, sizeof(buf) - 1)) > 0) {
-                buf[len] = '\0';
-
-                for (int i = 0; i < len; i++) {
-                    char c = buf[i];
-
-                    if (c == '\n') {
-                        sse_line[sse_len] = '\0';
-
-                        if (strncmp(sse_line, "data: ", 6) == 0) {
-                            const char *data_str = sse_line + 6;
-
-                            /* Check for [DONE] */
-                            if (strcmp(data_str, "[DONE]") == 0) {
-                                sse_done = true;
-                                break;
-                            }
-
-                            /* Parse JSON and extract base64 data */
-                            cJSON *ev = cJSON_Parse(data_str);
-                            if (ev) {
-                                cJSON *code_item = cJSON_GetObjectItem(ev, "code");
-                                cJSON *data_item = cJSON_GetObjectItem(ev, "data");
-
-                                if (cJSON_IsNumber(code_item) &&
-                                    (code_item->valueint == 0 || code_item->valueint == 20000000) &&
-                                    cJSON_IsString(data_item) &&
-                                    data_item->valuestring != NULL) {
-
-                                    /* Base64 decode */
-                                    size_t src_len = strlen(data_item->valuestring);
-                                    size_t dst_len = 0;
-
-                                    /* Query required size */
-                                    mbedtls_base64_decode(NULL, 0, &dst_len,
-                                        (const uint8_t *)data_item->valuestring, src_len);
-
-                                    if (dst_len > 0 && pcm_len + dst_len <= TTS_PCM_BUF_SIZE) {
-                                        mbedtls_base64_decode(pcm_buf + pcm_len, dst_len, &dst_len,
-                                            (const uint8_t *)data_item->valuestring, src_len);
-                                        pcm_len += dst_len;
-                                    }
-                                }
-
-                                if (cJSON_IsNumber(code_item) && code_item->valueint == 20000000) {
-                                    sse_done = true;
-                                }
-
-                                cJSON_Delete(ev);
-                            }
-                        }
-
-                        sse_len = 0;
-                    } else if (sse_len < (int)sizeof(sse_line) - 1) {
-                        sse_line[sse_len++] = c;
-                    }
-                }
-            }
-
-            ESP_LOGI(TAG, "TTS done, pcm=%zu bytes (sse_done=%d)", pcm_len, sse_done);
+        if (status == 200 && pcm_len > 0) {
+            ESP_LOGI(TAG, "HTTP %ld, audio=%zu bytes (%.1fs), error=%d",
+                     status, pcm_len, (float)(pcm_len / 2) / 24000.0f,
+                     http_ctx.error);
+        } else if (status == 200 && pcm_len == 0) {
+            ESP_LOGE(TAG, "TTS: no audio data in response");
+            qa_ui_add_log("[ERR] TTS响应为空");
+            qa_ui_set_status("TTS失败");
+        } else {
+            ESP_LOGE(TAG, "TTS HTTP error: %ld", status);
+            qa_ui_add_log("[ERR] TTS错误(%ld)", status);
+            qa_ui_set_status("TTS失败");
         }
     } else {
         ESP_LOGE(TAG, "TTS request failed: %s", esp_err_to_name(err));
         qa_ui_add_log("[ERR] TTS网络不可用");
         qa_ui_set_status("TTS失败");
+    }
+
+    /* Free accumulated response buffer */
+    if (http_ctx.resp_buf) {
+        heap_caps_free(http_ctx.resp_buf);
+        http_ctx.resp_buf = NULL;
     }
 
     /* ------------------------------------------------------------------ */
@@ -294,9 +360,9 @@ static void play_tts(const char *text,
         size_t mono_samples = pcm_len / sizeof(int16_t);
         size_t stereo_samples = mono_samples * 2;
 
-        /* Allocate stereo buffer */
+        /* Allocate stereo buffer (PSRAM — internal RAM is too fragmented) */
         int16_t *stereo_buf = heap_caps_malloc(stereo_samples * sizeof(int16_t),
-                                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (stereo_buf) {
             mono_to_stereo(stereo_buf, (const int16_t *)pcm_buf, mono_samples);
 

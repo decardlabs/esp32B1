@@ -19,6 +19,7 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_crt_bundle.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -410,6 +411,11 @@ static void process_wav_data(uint8_t *wav_data, size_t file_size,
     ESP_LOGI(TAG, "Request body: %d bytes (json)", written);
     ESP_LOGD(TAG, "JSON prefix: %.80s", json_str);
 
+    /* Diagnostic: log internal RAM state before TLS setup */
+    ESP_LOGI(TAG, "MEM: int_free=%d int_largest=%d",
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
     /* ------------------------------------------------------------------ */
     /*  4. Send HTTP POST                                                 */
     /* ------------------------------------------------------------------ */
@@ -431,6 +437,7 @@ static void process_wav_data(uint8_t *wav_data, size_t file_size,
         .event_handler  = http_event_handler,
         .user_data      = (void *)&resp_ctx,
         .skip_cert_common_name_check = true,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     client = esp_http_client_init(&http_cfg);
@@ -560,6 +567,15 @@ static void process_wav_data(uint8_t *wav_data, size_t file_size,
     qa_ui_set_status("识别完成");
     qa_ui_add_user_msg(asr_result);
 
+    /* Free ASR TLS before LLM starts — both need ~16KB internal RAM */
+    esp_http_client_cleanup(client);
+    client = NULL;
+
+    /* Diagnostic: log internal RAM after TLS cleanup */
+    ESP_LOGI(TAG, "MEM: int_free=%d int_largest=%d",
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
     err = volc_llm_submit(asr_result);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "volc_llm_submit returned %s", esp_err_to_name(err));
@@ -568,7 +584,6 @@ static void process_wav_data(uint8_t *wav_data, size_t file_size,
     /* ------------------------------------------------------------------ */
     /*  7. Cleanup                                                        */
     /* ------------------------------------------------------------------ */
-    esp_http_client_cleanup(client);
     resp_ctx_cleanup(&resp_ctx);
     free(json_str);
     heap_caps_free(b64_data);
