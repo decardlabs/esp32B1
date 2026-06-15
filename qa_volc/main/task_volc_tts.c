@@ -27,6 +27,7 @@
 #include "bsp_audio.h"
 #include "es8388.h"
 #include "esp_crt_bundle.h"
+#include "esp_task_wdt.h"
 #include "task_qa_lvgl.h"
 
 /* ------------------------------------------------------------------ */
@@ -140,6 +141,13 @@ static void process_audio_payload(tts_http_ctx_t *ctx)
             (const uint8_t *)b64_start, src_len);
         ctx->pcm_len += dst_len;
         fragments++;
+
+        /* Yield periodically to prevent task watchdog timeout
+         * during long decodes (e.g. 163 fragments ~65s audio). */
+        if (fragments % 10 == 0) {
+            esp_task_wdt_reset();
+            vTaskDelay(1);
+        }
 
         cursor = b64_end + 1;  /* continue searching for more fragments */
     }
@@ -351,45 +359,55 @@ static void play_tts(const char *text,
     }
 
     /* ------------------------------------------------------------------ */
-    /*  4. Playback PCM via I2S                                          */
+    /*  4. Playback PCM via I2S (chunked, no large stereo buffer)         */
     /* ------------------------------------------------------------------ */
 
     if (pcm_len > 0) {
         /* PCM is 24000Hz mono 16-bit.
-         * I2S is 24000Hz stereo.  Convert mono→stereo before writing. */
+         * I2S is 24000Hz stereo.  Convert mono→stereo in chunks on the
+         * stack to avoid allocating a 2× stereo buffer (3MB PCM → 6MB stereo
+         * would exceed PSRAM). 128 mono samples per chunk = 256 stack int16_t. */
+        #define CHUNK_MONO 128
+
         size_t mono_samples = pcm_len / sizeof(int16_t);
-        size_t stereo_samples = mono_samples * 2;
+        size_t offset = 0;
 
-        /* Allocate stereo buffer (PSRAM — internal RAM is too fragmented) */
-        int16_t *stereo_buf = heap_caps_malloc(stereo_samples * sizeof(int16_t),
-                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (stereo_buf) {
-            mono_to_stereo(stereo_buf, (const int16_t *)pcm_buf, mono_samples);
+        /* Enable speaker */
+        es8388_set_mute(false);
+        es8388_speaker_enable(true);
 
-            /* Enable speaker */
-            es8388_set_mute(false);
-            es8388_speaker_enable(true);
+        qa_ui_set_status("播放中...");
 
-            qa_ui_set_status("播放中...");
+        int16_t total_written_stereo = 0;
 
-            /* Write all stereo samples to I2S */
+        while (offset < mono_samples) {
+            size_t chunk = mono_samples - offset;
+            if (chunk > CHUNK_MONO) chunk = CHUNK_MONO;
+
+            int16_t stereo[CHUNK_MONO * 2];
+            mono_to_stereo(stereo, (const int16_t *)pcm_buf + offset, chunk);
+
             size_t written = 0;
-            esp_err_t werr = bsp_audio_write(stereo_buf, stereo_samples, &written, 5000);
+            esp_err_t werr = bsp_audio_write(stereo, chunk * 2, &written, 5000);
             if (werr != ESP_OK) {
-                ESP_LOGE(TAG, "I2S write failed: %s", esp_err_to_name(werr));
-            } else {
-                ESP_LOGI(TAG, "Played %zu stereo samples (%.1fs)",
-                         written, (float)mono_samples / 24000.0f);
+                ESP_LOGE(TAG, "I2S write failed: %s (offset=%zu/%zu)",
+                         esp_err_to_name(werr), offset, mono_samples);
+                break;
             }
+            total_written_stereo += written;
+            offset += chunk;
 
-            heap_caps_free(stereo_buf);
-
-            /* Stop speaker */
-            es8388_speaker_enable(false);
-            es8388_set_mute(true);
-        } else {
-            ESP_LOGE(TAG, "Failed to allocate stereo buffer");
+            vTaskDelay(1);  /* yield to prevent task WDT */
         }
+
+        ESP_LOGI(TAG, "Played %d stereo samples (%.1fs)",
+                 total_written_stereo, (float)mono_samples / 24000.0f);
+
+        /* Stop speaker */
+        es8388_speaker_enable(false);
+        es8388_set_mute(true);
+
+        #undef CHUNK_MONO
     }
 
     qa_ui_add_log("[TTS] 播放完成");
